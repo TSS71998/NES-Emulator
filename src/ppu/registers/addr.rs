@@ -1,13 +1,11 @@
 pub struct AddrRegister {
-    value: (u8, u8),
-    hi_ptr: bool,
+    value: (u8, u8)
 }
 
 impl AddrRegister {
     pub fn new() -> Self {
         AddrRegister {
-            value: (0, 0),
-            hi_ptr: true
+            value: (0, 0)
         }
     }
 
@@ -16,17 +14,16 @@ impl AddrRegister {
         self.value.1 = (data & 0xff) as u8;
     }
 
-    pub fn update(&mut self, data: u8) {
-        if self.hi_ptr {
+    pub fn update(&mut self, data: u8, hi_byte: bool) {
+        if hi_byte {
             self.value.0 = data;
         } else {
-            self.value.1 = data;
+            self.value.1 = data
         }
 
-        if self.get() > 0x3fff{
+        if self.get() > 0x3fff {
             self.set(self.get() & 0b11111111111111);
         }
-        self.hi_ptr = !self.hi_ptr;
     }
 
     pub fn increment(&mut self, inc: u8) {
@@ -38,14 +35,6 @@ impl AddrRegister {
         if self.get() > 0x3fff {
             self.set(self.get() & 0b11111111111111);
         }
-    }
-
-    pub fn reset_latch(&mut self) {
-        self.hi_ptr = true;
-    }
-
-    pub fn is_hi_byte_next(&self) -> bool {
-        self.hi_ptr
     }
 
     pub fn get(&self) -> u16 {

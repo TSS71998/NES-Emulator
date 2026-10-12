@@ -112,7 +112,8 @@ mod interrupt {
         itype: InterruptType::NMI,
         vector_addr: 0xfffA,
         b_flag_mask: 0b00100000,
-        cpu_cycles: 2,
+        // 2 dummy reads, 3 stack pushes, 2 vector reads
+        cpu_cycles: 7,
     };
 }
 
@@ -631,8 +632,8 @@ impl<'a> CPU<'a> {
     fn interrupt(&mut self, interrupt: interrupt::Interrupt) {
         self.stack_push_u16(self.program_counter);
         let mut flag = self.status.clone();
-        flag.set(CpuFlags::BREAK, interrupt.b_flag_mask & 0b010000 == 1);
-        flag.set(CpuFlags::BREAK2, interrupt.b_flag_mask & 0b100000 == 1);
+        flag.set(CpuFlags::BREAK, interrupt.b_flag_mask & 0b010000 != 0);
+        flag.set(CpuFlags::BREAK2, interrupt.b_flag_mask & 0b100000 != 0);
 
         self.stack_push(flag.bits);
         self.status.insert(CpuFlags::INTERRUPT_DISABLE);
@@ -664,7 +665,7 @@ impl<'a> CPU<'a> {
 
             let opcode = opcodes
                 .get(&code)
-                .expect(&format!("OpCode {:x} is not recognized", code));
+                .unwrap_or_else(|| panic!("OpCode {:x} is not recognized", code));
 
             // if opcode.code == 0x24 {
             //     panic!(format!("mem 01 = {}", self.mem_read(0x01)));
@@ -1092,10 +1093,13 @@ impl<'a> CPU<'a> {
 
                 /* LAX */
                 0xa7 | 0xb7 | 0xaf | 0xbf | 0xa3 | 0xb3 => {
-                    let (addr, _) = self.get_operand_address(&opcode.mode);
+                    let (addr, page_cross) = self.get_operand_address(&opcode.mode);
                     let data = self.mem_read(addr);
                     self.set_register_a(data);
                     self.register_x = self.register_a;
+                    if page_cross {
+                        self.bus.tick(1);
+                    }
                 }
 
                 /* SAX */
@@ -1122,13 +1126,16 @@ impl<'a> CPU<'a> {
 
                 /* LAS */
                 0xbb => {
-                    let (addr, _) = self.get_operand_address(&opcode.mode);
+                    let (addr, page_cross) = self.get_operand_address(&opcode.mode);
                     let mut data = self.mem_read(addr);
                     data = data & self.stack_pointer;
                     self.register_a = data;
                     self.register_x = data;
                     self.stack_pointer = data;
                     self.update_zero_and_negative_flags(data);
+                    if page_cross {
+                        self.bus.tick(1);
+                    }
                 }
 
                 /* TAS */

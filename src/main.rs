@@ -6,12 +6,17 @@ pub mod trace;
 pub mod ppu;
 pub mod render;
 pub mod joypad;
+pub mod apu;
+pub mod frame_limiter;
+pub mod audio;
 
 use bus::Bus;
 use cartridge::Rom;
 use cpu::CPU;
 use render::frame::Frame;
 use ppu::NesPPU;
+use audio::AudioOutput;
+use frame_limiter::FrameLimiter;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -33,9 +38,27 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut canvas = window.into_canvas().present_vsync().build().unwrap();
+    // Vsync paces frames at a fixed delay after emulation, but only works as the
+    // frame clock on a ~60 Hz display; otherwise fall back to the frame limiter.
+    let refresh_rate = window
+        .display_index()
+        .and_then(|i| video_subsystem.current_display_mode(i))
+        .map(|mode| mode.refresh_rate)
+        .unwrap_or(0);
+    let use_vsync = (59..=61).contains(&refresh_rate);
+
+    let mut canvas_builder = window.into_canvas();
+    if use_vsync {
+        canvas_builder = canvas_builder.present_vsync();
+    }
+    let mut canvas = canvas_builder.build().unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
     canvas.set_scale(3.0, 3.0).unwrap();
+
+    let audio_subsystem = sdl_context.audio().unwrap();
+    let mut audio_output = AudioOutput::new(&audio_subsystem);
+    let sample_rate = audio_output.sample_rate();
+    let mut frame_limiter = FrameLimiter::new(frame_limiter::NES_FPS);
 
     let creator = canvas.texture_creator();
     let mut texture = creator
@@ -58,12 +81,15 @@ fn main() {
     key_map.insert(Keycode::S, joypad::JoypadButton::BUTTON_B);
 
     // run the game cycle
-    let bus = Bus::new(rom, move |ppu: &NesPPU, joypad: &mut joypad::Joypad| {
+    let mut bus = Bus::new(rom, move |ppu: &NesPPU, joypad: &mut joypad::Joypad| {
         render::render(ppu, &mut frame);
         texture.update(None, &frame.data, 256 * 3).unwrap();
 
         canvas.copy(&texture, None, None).unwrap();
 
+        if !use_vsync {
+            frame_limiter.wait();
+        }
         canvas.present();
         for event in event_pump.poll_iter() {
             match event {
@@ -87,6 +113,8 @@ fn main() {
             }
          }
     });
+
+    bus.set_audio_callback(sample_rate, move |samples: &[f32]| audio_output.push(samples));
 
     let mut cpu = CPU::new(bus);
 

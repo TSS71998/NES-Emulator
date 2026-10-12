@@ -327,11 +327,10 @@ lazy_static! {
         // OpCode::new(0xea, "NOP", 1,2, AddressingMode::NoneAddressing),
         OpCode::new(0xfa, "*NOP", 1,2, AddressingMode::NoneAddressing),
 
-        OpCode::new(0xab, "*LXA", 2, 3, AddressingMode::Immediate), //todo: highly unstable and not used
-        //http://visual6502.org/wiki/index.php?title=6502_Opcode_8B_%28XAA,_ANE%29
-        OpCode::new(0x8b, "*XAA", 2, 3, AddressingMode::Immediate), //todo: highly unstable and not used
-        OpCode::new(0xbb, "*LAS", 3, 2, AddressingMode::Absolute_Y), //todo: highly unstable and not used
-        OpCode::new(0x9b, "*TAS", 3, 2, AddressingMode::Absolute_Y), //todo: highly unstable and not used
+        OpCode::new(0xab, "*LXA", 2, 2, AddressingMode::Immediate), //todo: highly unstable and not used
+        OpCode::new(0x8b, "*XAA", 2, 2, AddressingMode::Immediate), //todo: highly unstable and not used
+        OpCode::new(0xbb, "*LAS", 3, 4, AddressingMode::Absolute_Y), //todo: highly unstable and not used
+        OpCode::new(0x9b, "*TAS", 3, 5, AddressingMode::Absolute_Y), //todo: highly unstable and not used
         OpCode::new(0x93, "*AHX", 2, /* guess */ 8, AddressingMode::Indirect_Y), //todo: highly unstable and not used
         OpCode::new(0x9f, "*AHX", 3, /* guess */ 4/* or 5*/, AddressingMode::Absolute_Y), //todo: highly unstable and not used
         OpCode::new(0x9e, "*SHX", 3, /* guess */ 4/* or 5*/, AddressingMode::Absolute_Y), //todo: highly unstable and not used

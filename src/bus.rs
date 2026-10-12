@@ -3,6 +3,7 @@ use crate::cpu::Mem;
 use crate::joypad::Joypad;
 use crate::ppu::NesPPU;
 use crate::ppu::PPU;
+use crate::apu::APU;
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -40,9 +41,14 @@ pub struct Bus<'call> {
     cpu_vram: [u8; 2048],
     prg_rom: Vec<u8>,
     ppu: NesPPU,
+    apu: APU,
+
+    stall_cycles: usize,
+    oam_dma_pending: bool,
 
     cycles: usize,
     gameloop_callback: Box<dyn FnMut(&NesPPU, &mut Joypad) + 'call>,
+    audio_callback: Option<Box<dyn FnMut(&[f32]) -> f64 + 'call>>,
     joypad1: Joypad
 }
 
@@ -56,10 +62,21 @@ impl<'a> Bus<'a> {
             cpu_vram: [0; 2048],
             prg_rom: rom.prg_rom,
             ppu: ppu,
+            apu: APU::new(44100),
+            stall_cycles: 0,
+            oam_dma_pending: false,
             cycles: 0,
             gameloop_callback: Box::from(gameloop_callback),
+            audio_callback: None,
             joypad1: Joypad::new()
         }
+    }
+
+    pub fn set_audio_callback<F>(&mut self, sample_rate: u32, callback: F)
+        where F: FnMut(&[f32]) -> f64 + 'a
+    {
+        self.apu.set_sample_rate(sample_rate);
+        self.audio_callback = Some(Box::new(callback));
     }
 
     fn read_prg_rom(&self, mut addr: u16) -> u8 {
@@ -73,8 +90,39 @@ impl<'a> Bus<'a> {
 
     pub fn tick(&mut self, cycles: u8) {
         self.cycles += cycles as usize;
-        let new_frame = self.ppu.tick(cycles * 3);
+
+        for _ in 0..cycles {
+            self.step_cycle();
+        }
+
+        if self.oam_dma_pending {
+            self.oam_dma_pending = false;
+            self.stall_cycles += 513 + self.cycles % 2;
+        }
+
+        while self.stall_cycles > 0 {
+            self.stall_cycles -= 1;
+            self.step_cycle();
+        }
+    }
+
+    fn step_cycle(&mut self) {
+        self.cycles += 1;
+        self.apu.tick();
+
+        if let Some(addr) = self.apu.dmc_fetch_addr() {
+            let byte = self.read_prg_rom(addr);
+            self.apu.dmc_provide_byte(byte);
+            self.stall_cycles += 4;
+        }
+
+        let new_frame = self.ppu.tick(3);
         if new_frame {
+            if let Some(callback) = self.audio_callback.as_mut() {
+                let samples = self.apu.take_samples();
+                let rate_adjust = callback(&samples);
+                self.apu.set_rate_adjust(rate_adjust);
+            }
             (self.gameloop_callback)(&self.ppu, &mut self.joypad1);
         }
     }
@@ -82,7 +130,6 @@ impl<'a> Bus<'a> {
     pub fn poll_nmi_status(&mut self) -> Option<u8> {
         self.ppu.poll_nmi_interrupt()
     }
-
 }
 
 impl Mem for Bus<'_> {
@@ -100,10 +147,12 @@ impl Mem for Bus<'_> {
             0x2004 => self.ppu.read_oam_data(),
             0x2007 => self.ppu.read_data(),
 
-            0x4000..=0x4015 => {
-                //ignore APU 
+            0x4000..=0x4013 => {
+                //APU channel registers are write-only
                 0
             }
+
+            0x4015 => self.apu.read_status(),
 
             0x4016 => {
                 self.joypad1.read()
@@ -160,7 +209,7 @@ impl Mem for Bus<'_> {
             }
 
             0x4000..=0x4013 | 0x4015 => {
-                //ignore APU 
+                self.apu.write_register(addr, data);
             }
 
             0x4016 => {
@@ -168,7 +217,7 @@ impl Mem for Bus<'_> {
             }
 
             0x4017 => {
-                // ignore joypad 2
+                self.apu.write_register(addr, data);
             }
 
             0x4014 => {
@@ -179,10 +228,8 @@ impl Mem for Bus<'_> {
                 }
 
                 self.ppu.write_oam_dma(&buffer);
-
-                // todo: handle this eventually
-                // let add_cycles: u16 = if self.cycles % 2 == 1 { 514 } else { 513 };
-                // self.tick(add_cycles); //todo this will cause weird effects as PPU will have 513/514 * 3 ticks
+                
+                self.oam_dma_pending = true;
             }
 
             0x2008..=PPU_REGISTERS_MIRRORS_END => {

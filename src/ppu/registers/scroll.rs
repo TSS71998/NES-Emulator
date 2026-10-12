@@ -1,7 +1,6 @@
 pub struct ScrollRegister {
     pub scroll_x: u8,
     pub scroll_y: u8,
-    pub latch: bool
 }
 
 impl ScrollRegister {
@@ -9,18 +8,15 @@ impl ScrollRegister {
         ScrollRegister {
             scroll_x: 0,
             scroll_y: 0,
-            latch: false
         }
     }
 
-    pub fn write(&mut self, data: u8) {
-        if !self.latch {
+    pub fn write(&mut self, data: u8, first_write: bool) {
+        if first_write {
             self.scroll_x = data;
         } else {
             self.scroll_y = data;
         }
-
-        self.latch = !self.latch;
     }
 
     // $2006 writes go through the same internal register as $2005 (loopy t),
@@ -35,9 +31,5 @@ impl ScrollRegister {
     pub fn write_addr_lo(&mut self, data: u8) {
         self.scroll_x = ((data & 0b1_1111) << 3) | (self.scroll_x & 0b111);
         self.scroll_y = (self.scroll_y & 0b1100_0111) | ((data >> 5) << 3);
-    }
-
-    pub fn reset_latch(&mut self) {
-        self.latch = false;
     }
 }

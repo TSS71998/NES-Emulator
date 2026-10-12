@@ -21,6 +21,10 @@ pub struct NesPPU {
     pub oam_data: [u8; 256],
     pub oam_addr: u8,
 
+    write_latch: bool,
+    odd_frame: bool,
+    render_y_bump: u16,
+
     pub mirroring: Mirroring,
     internal_data_buf: u8,
     pub scanlines: u16,
@@ -59,6 +63,9 @@ impl NesPPU {
             scanlines: 0,
             nmi_interrupt: None,
             scanline_scroll: [(0, 0, 0x2000); 240],
+            write_latch: false,
+            odd_frame: false,
+            render_y_bump: 0,
 
             addr: AddrRegister::new(),
             ctrl: ControlRegister::new(),
@@ -72,8 +79,28 @@ impl NesPPU {
         NesPPU::new(vec![0; 2048], Mirroring::Horizontal)
     }
 
+    fn is_rendering(&self) -> bool {
+        (self.mask.show_background() || self.mask.show_sprites())
+            && (self.scanlines < 240 || self.scanlines == 261)
+    }
+
     fn increment_vram_addr(&mut self) {
-        self.addr.increment(self.ctrl.vram_addr_increment());
+        if self.is_rendering() {
+            self.render_y_bump += 1;
+        } else {
+            self.addr.increment(self.ctrl.vram_addr_increment());
+        }
+    }
+
+    fn current_scroll(&self) -> (u8, u8, u16) {
+        let mut nametable = self.ctrl.nametable_addr();
+        let mut y = self.scroll.scroll_y as u16 + self.render_y_bump;
+
+        while y >= 240 {
+            y -= 240;
+            nametable ^= 0x800;
+        }
+        (self.scroll.scroll_x, y as u8, nametable)
     }
 
     pub fn mirror_vram_addr(&self, addr: u16) -> u16 {
@@ -91,17 +118,19 @@ impl NesPPU {
 
     pub fn tick(&mut self, cycles: u8) -> bool {
         self.cycles += cycles as usize;
-        if self.cycles >= 341 {
+        let rendering = self.mask.show_background() || self.mask.show_sprites();
+        let line_len = if self.scanlines == 261 && self.odd_frame && rendering { 340 } else { 341 }; 
+
+        if self.cycles >= line_len {
             if self.is_sprite_0_hit() {
                 self.status.set_sprite_zero_hit(true);
             }
 
             if (self.scanlines as usize) < 240 {
-                self.scanline_scroll[self.scanlines as usize] =
-                    (self.scroll.scroll_x, self.scroll.scroll_y, self.ctrl.nametable_addr());
+                self.scanline_scroll[self.scanlines as usize] = self.current_scroll();
             }
 
-            self.cycles = self.cycles - 341;
+            self.cycles = self.cycles - line_len;
             self.scanlines += 1;
             
             if self.scanlines == 241 {
@@ -114,7 +143,9 @@ impl NesPPU {
 
             if self.scanlines >= 262 {
                 self.scanlines = 0;
+                self.odd_frame = !self.odd_frame;
                 self.nmi_interrupt = None;
+                self.render_y_bump = 0;
                 self.status.set_sprite_zero_hit(false);
                 self.status.reset_vblank_status();
                 return true;
@@ -182,7 +213,7 @@ impl NesPPU {
         };
         let row = row % 8;
 
-        let scroll = (self.scroll.scroll_x, self.scroll.scroll_y, self.ctrl.nametable_addr());
+        let scroll = self.current_scroll();
         for col in 0..8 {
             let x = sprite_x + col;
             // no hit at x=255
@@ -206,14 +237,16 @@ impl NesPPU {
 
 impl PPU for NesPPU {
     fn write_to_ppu_addr(&mut self, value: u8) {
-        // games like SMB rely on $2006 writes resetting the nametable select and scroll
-        if self.addr.is_hi_byte_next() {
+        let first_write = !self.write_latch;
+        if first_write {
             self.ctrl.set_nametable((value >> 2) & 0b11);
             self.scroll.write_addr_hi(value);
         } else {
             self.scroll.write_addr_lo(value);
+            self.render_y_bump = 0;
         }
-        self.addr.update(value);
+        self.addr.update(value, first_write);
+        self.write_latch = !self.write_latch;
     }
 
     fn write_to_ctrl(&mut self, value: u8) {
@@ -238,7 +271,8 @@ impl PPU for NesPPU {
     }
 
     fn write_to_scroll(&mut self, value: u8) {
-        self.scroll.write(value);
+        self.scroll.write(value, !self.write_latch);
+        self.write_latch = !self.write_latch;
     }
 
     fn write_to_data(&mut self, value: u8) {
@@ -300,8 +334,7 @@ impl PPU for NesPPU {
     fn read_status(&mut self) -> u8 {
         let data = self.status.snapshot();
         self.status.reset_vblank_status();
-        self.addr.reset_latch();
-        self.scroll.reset_latch();
+        self.write_latch = false;
         data
     }
 
