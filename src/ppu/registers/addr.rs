@@ -44,6 +44,10 @@ impl AddrRegister {
         self.hi_ptr = true;
     }
 
+    pub fn is_hi_byte_next(&self) -> bool {
+        self.hi_ptr
+    }
+
     pub fn get(&self) -> u16 {
         ((self.value.0 as u16) << 8) | (self.value.1 as u16)
     }

@@ -23,9 +23,12 @@ pub struct NesPPU {
 
     pub mirroring: Mirroring,
     internal_data_buf: u8,
-    scanlines: u16,
+    pub scanlines: u16,
     cycles: usize,
-    pub nmi_interrupt: Option<u8>
+    pub nmi_interrupt: Option<u8>,
+    // (scroll_x, scroll_y, nametable_addr) in effect for each visible scanline,
+    // so mid-frame scroll splits (e.g. SMB status bar) render correctly
+    pub scanline_scroll: [(u8, u8, u16); 240],
 }
 
 pub trait PPU {
@@ -55,6 +58,7 @@ impl NesPPU {
             cycles: 0,
             scanlines: 0,
             nmi_interrupt: None,
+            scanline_scroll: [(0, 0, 0x2000); 240],
 
             addr: AddrRegister::new(),
             ctrl: ControlRegister::new(),
@@ -88,6 +92,15 @@ impl NesPPU {
     pub fn tick(&mut self, cycles: u8) -> bool {
         self.cycles += cycles as usize;
         if self.cycles >= 341 {
+            if self.is_sprite_0_hit() {
+                self.status.set_sprite_zero_hit(true);
+            }
+
+            if (self.scanlines as usize) < 240 {
+                self.scanline_scroll[self.scanlines as usize] =
+                    (self.scroll.scroll_x, self.scroll.scroll_y, self.ctrl.nametable_addr());
+            }
+
             self.cycles = self.cycles - 341;
             self.scanlines += 1;
             
@@ -110,6 +123,82 @@ impl NesPPU {
         return false;
     } 
 
+    /// Returns the logical nametable's offset into vram, the tile column/row and the
+    /// 2-bit pixel value of the background at a screen position for the given
+    /// (scroll_x, scroll_y, nametable_addr).
+    pub fn bg_pixel(&self, screen_x: usize, screen_y: usize, scroll: (u8, u8, u16)) -> (usize, usize, usize, u8) {
+        let (scroll_x, scroll_y, nametable_addr) = scroll;
+        let base_nt = ((nametable_addr - 0x2000) / 0x400) as usize;
+
+        // position in the 512x480 space made of the 4 logical nametables
+        let world_x = screen_x + scroll_x as usize + (base_nt & 1) * 256;
+        let world_y = screen_y + scroll_y as usize + (base_nt >> 1) * 240;
+        let nt_x = (world_x / 256) % 2;
+        let nt_y = (world_y / 240) % 2;
+        let x = world_x % 256;
+        let y = world_y % 240;
+        let tile_column = x / 8;
+        let tile_row = y / 8;
+
+        // mirror_vram_addr maps the logical nametable onto physical vram
+        let nt_start = self.mirror_vram_addr(0x2000 + ((nt_y * 2 + nt_x) * 0x400) as u16) as usize;
+        let tile_idx = self.vram[nt_start + tile_row * 32 + tile_column] as usize;
+        let tile = self.ctrl.bknd_pattern_addr() as usize + tile_idx * 16;
+
+        let shift = 7 - (x % 8);
+        let upper = (self.chr_rom[tile + y % 8] >> shift) & 1;
+        let lower = (self.chr_rom[tile + y % 8 + 8] >> shift) & 1;
+        (nt_start, tile_column, tile_row, lower << 1 | upper)
+    }
+
+    // Sprite 0 hit is set on the first pixel where an opaque sprite 0 pixel
+    // overlaps an opaque background pixel, checked once per visible scanline.
+    fn is_sprite_0_hit(&self) -> bool {
+        let line = self.scanlines as usize;
+        if line >= 240 || !self.mask.show_background() || !self.mask.show_sprites() {
+            return false;
+        }
+
+        // sprites are displayed one line below their OAM y
+        let sprite_y = self.oam_data[0] as usize + 1;
+        let height = self.ctrl.sprite_size() as usize;
+        if line < sprite_y || line >= sprite_y + height {
+            return false;
+        }
+
+        let attr = self.oam_data[2];
+        let sprite_x = self.oam_data[3] as usize;
+        let mut row = line - sprite_y;
+        if attr >> 7 & 1 == 1 {
+            row = height - 1 - row;
+        }
+
+        let tile_idx = self.oam_data[1] as usize;
+        let tile = if height == 16 {
+            // 8x16: bank from bit 0 of the tile index, bottom half is the next tile
+            (tile_idx & 1) * 0x1000 + (tile_idx & 0xfe) * 16 + (row / 8) * 16
+        } else {
+            self.ctrl.sprt_pattern_addr() as usize + tile_idx * 16
+        };
+        let row = row % 8;
+
+        let scroll = (self.scroll.scroll_x, self.scroll.scroll_y, self.ctrl.nametable_addr());
+        for col in 0..8 {
+            let x = sprite_x + col;
+            // no hit at x=255
+            if x >= 255 {
+                break;
+            }
+            let shift = if attr >> 6 & 1 == 1 { col } else { 7 - col };
+            let upper = (self.chr_rom[tile + row] >> shift) & 1;
+            let lower = (self.chr_rom[tile + row + 8] >> shift) & 1;
+            if (lower << 1 | upper) != 0 && self.bg_pixel(x, line, scroll).3 != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn poll_nmi_interrupt(&mut self) -> Option<u8> {
         self.nmi_interrupt.take()
     }
@@ -117,6 +206,13 @@ impl NesPPU {
 
 impl PPU for NesPPU {
     fn write_to_ppu_addr(&mut self, value: u8) {
+        // games like SMB rely on $2006 writes resetting the nametable select and scroll
+        if self.addr.is_hi_byte_next() {
+            self.ctrl.set_nametable((value >> 2) & 0b11);
+            self.scroll.write_addr_hi(value);
+        } else {
+            self.scroll.write_addr_lo(value);
+        }
         self.addr.update(value);
     }
 
@@ -205,7 +301,7 @@ impl PPU for NesPPU {
         let data = self.status.snapshot();
         self.status.reset_vblank_status();
         self.addr.reset_latch();
-        self.scroll.rest_latch();
+        self.scroll.reset_latch();
         data
     }
 

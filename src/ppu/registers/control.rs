@@ -73,4 +73,8 @@ impl ControlRegister {
     pub fn update(&mut self, data: u8) {
         self.bits = data;
     }
+
+    pub fn set_nametable(&mut self, nametable: u8) {
+        self.bits = (self.bits & !0b11) | (nametable & 0b11);
+    }
 }
