@@ -1,5 +1,5 @@
-use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
 use sdl2::AudioSubsystem;
+use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -15,7 +15,7 @@ const KI: f64 = 0.00005;
 struct SampleBuffer {
     samples: VecDeque<f32>,
     last_pull: Instant,
-    last_pull_len: usize
+    last_pull_len: usize,
 }
 
 impl AudioCallback for SampleBuffer {
@@ -35,7 +35,7 @@ pub struct AudioOutput {
     sample_rate: u32,
     target_samples: f64,
     smoothed_fill: f64,
-    rate_trim: f64
+    rate_trim: f64,
 }
 
 impl AudioOutput {
@@ -43,13 +43,13 @@ impl AudioOutput {
         let desired = AudioSpecDesired {
             freq: Some(44100),
             channels: Some(1),
-            samples: Some(DEVICE_BUFFER_SAMPLES)
+            samples: Some(DEVICE_BUFFER_SAMPLES),
         };
         let device = audio
             .open_playback(None, &desired, |spec| SampleBuffer {
                 samples: VecDeque::with_capacity(spec.freq as usize / 4),
                 last_pull: Instant::now(),
-                last_pull_len: 0
+                last_pull_len: 0,
             })
             .unwrap();
         let sample_rate = device.spec().freq as u32;
@@ -61,7 +61,7 @@ impl AudioOutput {
             sample_rate,
             target_samples,
             smoothed_fill: target_samples,
-            rate_trim: 0.0
+            rate_trim: 0.0,
         }
     }
 

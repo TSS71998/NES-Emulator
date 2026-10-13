@@ -14,7 +14,7 @@ bitflags! {
 pub enum Color {
     Red,
     Green,
-    Blue
+    Blue,
 }
 
 impl MaskRegister {

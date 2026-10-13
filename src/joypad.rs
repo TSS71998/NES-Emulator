@@ -14,7 +14,7 @@ bitflags! {
 pub struct Joypad {
     strobe: bool,
     button_index: u8,
-    button_status: JoypadButton
+    button_status: JoypadButton,
 }
 
 impl Joypad {
@@ -22,7 +22,7 @@ impl Joypad {
         Joypad {
             strobe: false,
             button_index: 0,
-            button_status: JoypadButton::from_bits_truncate(0)
+            button_status: JoypadButton::from_bits_truncate(0),
         }
     }
 

@@ -1,8 +1,8 @@
 const CPU_CLOCK_NTSC: f64 = 1_789_773.0;
 
 const LENGTH_TABLE: [u8; 32] = [
-    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14,
-    12, 16, 24, 18, 48, 20, 96, 22, 192, 24, 72, 26, 16, 28, 32, 30,
+    10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
+    192, 24, 72, 26, 16, 28, 32, 30,
 ];
 
 const DUTY_TABLE: [[u8; 8]; 4] = [
@@ -13,8 +13,8 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
 ];
 
 const TRIANGLE_TABLE: [u8; 32] = [
-    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15,
 ];
 
 const NOISE_PERIOD_TABLE: [u16; 16] = [
@@ -32,7 +32,7 @@ pub struct Envelope {
     constant: bool,
     volume: u8,
     divider: u8,
-    decay: u8
+    decay: u8,
 }
 
 impl Envelope {
@@ -60,7 +60,11 @@ impl Envelope {
     }
 
     fn output(&self) -> u8 {
-        if self.constant { self.volume } else { self.decay }
+        if self.constant {
+            self.volume
+        } else {
+            self.decay
+        }
     }
 }
 
@@ -80,12 +84,15 @@ pub struct Pulse {
     sweep_negate: bool,
     sweep_shift: u8,
     sweep_divider: u8,
-    sweep_reload: bool
+    sweep_reload: bool,
 }
 
 impl Pulse {
     fn new(is_pulse1: bool) -> Self {
-        Pulse {is_pulse1, ..Default::default()}
+        Pulse {
+            is_pulse1,
+            ..Default::default()
+        }
     }
 
     fn write_control(&mut self, value: u8) {
@@ -135,7 +142,7 @@ impl Pulse {
         let period = self.timer_period as i32;
         let change = period >> self.sweep_shift;
         if self.sweep_negate {
-            period - change - if self.is_pulse1 {1} else {0}
+            period - change - if self.is_pulse1 { 1 } else { 0 }
         } else {
             period + change
         }
@@ -146,7 +153,8 @@ impl Pulse {
     }
 
     fn clock_sweep(&mut self) {
-        if self.sweep_divider == 0 && self.sweep_enabled && self.sweep_shift > 0 && !self.is_muted() {
+        if self.sweep_divider == 0 && self.sweep_enabled && self.sweep_shift > 0 && !self.is_muted()
+        {
             self.timer_period = self.sweep_target().max(0) as u16;
         }
         if self.sweep_divider == 0 || self.sweep_reload {
@@ -164,7 +172,10 @@ impl Pulse {
     }
 
     fn output(&self) -> u8 {
-        if self.length == 0 || self.is_muted() || DUTY_TABLE[self.duty as usize][self.duty_pos as usize] == 0 {
+        if self.length == 0
+            || self.is_muted()
+            || DUTY_TABLE[self.duty as usize][self.duty_pos as usize] == 0
+        {
             0
         } else {
             self.envelope.output()
@@ -182,7 +193,7 @@ struct Triangle {
     timer_period: u16,
     timer: u16,
     seq_pos: u8,
-    length: u8
+    length: u8,
 }
 
 impl Triangle {
@@ -233,7 +244,7 @@ impl Triangle {
     }
 
     fn clock_length(&mut self) {
-        if !self.control && self.length > 0{
+        if !self.control && self.length > 0 {
             self.length -= 1;
         }
     }
@@ -251,7 +262,7 @@ struct Noise {
     timer_period: u16,
     timer: u16,
     shift: u16,
-    length: u8
+    length: u8,
 }
 
 impl Noise {
@@ -264,7 +275,7 @@ impl Noise {
             timer_period: NOISE_PERIOD_TABLE[0],
             timer: 0,
             shift: 1,
-            length: 0
+            length: 0,
         }
     }
 
@@ -295,7 +306,7 @@ impl Noise {
     fn clock_timer(&mut self) {
         if self.timer == 0 {
             self.timer = self.timer_period - 1;
-            let tap = if self.mode {6} else {1};
+            let tap = if self.mode { 6 } else { 1 };
             let feedback = (self.shift & 1) ^ ((self.shift >> tap) & 1);
             self.shift = (self.shift >> 1) | (feedback << 14);
         } else {
@@ -312,7 +323,7 @@ impl Noise {
     fn output(&self) -> u8 {
         if self.length == 0 || self.shift & 1 == 1 {
             0
-        }  else {
+        } else {
             self.envelope.output()
         }
     }
@@ -331,7 +342,7 @@ struct Dmc {
     sample_buffer: Option<u8>,
     shift_reg: u8,
     bits_remaining: u8,
-    silence: bool
+    silence: bool,
 }
 
 impl Dmc {
@@ -349,7 +360,7 @@ impl Dmc {
             sample_buffer: None,
             shift_reg: 0,
             bits_remaining: 8,
-            silence: true
+            silence: true,
         }
     }
 
@@ -394,7 +405,11 @@ impl Dmc {
 
     fn provide_byte(&mut self, byte: u8) {
         self.sample_buffer = Some(byte);
-        self.current_addr = if self.current_addr == 0xffff {0x8000} else {self.current_addr + 1};
+        self.current_addr = if self.current_addr == 0xffff {
+            0x8000
+        } else {
+            self.current_addr + 1
+        };
         self.bytes_remaining -= 1;
         if self.bytes_remaining == 0 && self.loop_flag {
             self.restart();
@@ -420,14 +435,14 @@ impl Dmc {
         self.shift_reg >>= 1;
         self.bits_remaining -= 1;
 
-        if self.bits_remaining == 0{
+        if self.bits_remaining == 0 {
             self.bits_remaining = 8;
             match self.sample_buffer.take() {
                 Some(byte) => {
                     self.shift_reg = byte;
                     self.silence = false;
                 }
-                None => self.silence = true
+                None => self.silence = true,
             }
         }
     }
@@ -440,14 +455,18 @@ impl Dmc {
 struct HighPass {
     alpha: f32,
     prev_in: f32,
-    prev_out: f32
+    prev_out: f32,
 }
 
 impl HighPass {
     fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
         let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
         let dt = 1.0 / sample_rate;
-        HighPass { alpha: rc / (rc + dt), prev_in: 0.0, prev_out: 0.0 }
+        HighPass {
+            alpha: rc / (rc + dt),
+            prev_in: 0.0,
+            prev_out: 0.0,
+        }
     }
 
     fn process(&mut self, x: f32) -> f32 {
@@ -460,14 +479,17 @@ impl HighPass {
 
 struct LowPass {
     alpha: f32,
-    prev_out: f32
+    prev_out: f32,
 }
 
 impl LowPass {
     fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
         let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
         let dt = 1.0 / sample_rate;
-        LowPass { alpha: dt / (rc + dt), prev_out: 0.0 }
+        LowPass {
+            alpha: dt / (rc + dt),
+            prev_out: 0.0,
+        }
     }
 
     fn process(&mut self, x: f32) -> f32 {
@@ -499,7 +521,7 @@ pub struct APU {
     high_pass_90: HighPass,
     high_pass_440: HighPass,
     low_pass_14k: LowPass,
-    samples: Vec<f32>
+    samples: Vec<f32>,
 }
 
 impl APU {
@@ -534,7 +556,7 @@ impl APU {
             high_pass_90: HighPass::new(90.0, sample_rate as f32),
             high_pass_440: HighPass::new(440.0, sample_rate as f32),
             low_pass_14k: LowPass::new(14000.0, sample_rate as f32),
-            samples: Vec::with_capacity(sample_rate as usize / 30)
+            samples: Vec::with_capacity(sample_rate as usize / 30),
         }
     }
 
@@ -593,12 +615,26 @@ impl APU {
 
     pub fn read_status(&mut self) -> u8 {
         let mut status = 0;
-        if self.pulse1.length > 0 { status |= 0x01; }
-        if self.pulse2.length > 0 { status |= 0x02; }
-        if self.triangle.length > 0 { status |= 0x04; }
-        if self.noise.length > 0 { status |= 0x08; }
-        if self.dmc.bytes_remaining > 0 { status |= 0x10; }
+        if self.pulse1.length > 0 {
+            status |= 0x01;
+        }
+        if self.pulse2.length > 0 {
+            status |= 0x02;
+        }
+        if self.triangle.length > 0 {
+            status |= 0x04;
+        }
+        if self.noise.length > 0 {
+            status |= 0x08;
+        }
+        if self.dmc.bytes_remaining > 0 {
+            status |= 0x10;
+        }
         status
+    }
+
+    pub fn irq_pending(&self) -> bool {
+        false
     }
 
     pub fn dmc_fetch_addr(&self) -> Option<u16> {
@@ -650,7 +686,9 @@ impl APU {
 
     fn mix(&self) -> f32 {
         let pulse = self.pulse1.output() + self.pulse2.output();
-        let tnd = 3 * self.triangle.output() as usize + 2 * self.noise.output() as usize + self.dmc.output() as usize;
+        let tnd = 3 * self.triangle.output() as usize
+            + 2 * self.noise.output() as usize
+            + self.dmc.output() as usize;
         self.pulse_table[pulse as usize] + self.tnd_table[tnd]
     }
 

@@ -1,13 +1,13 @@
-bitflags!{
+bitflags! {
     pub struct ControlRegister: u8 {
-       const NAMETABLE1              = 0b00000001;
-       const NAMETABLE2              = 0b00000010;
-       const VRAM_ADD_INCREMENT      = 0b00000100;
-       const SPRITE_PATTERN_ADDR     = 0b00001000;
-       const BACKROUND_PATTERN_ADDR  = 0b00010000;
-       const SPRITE_SIZE             = 0b00100000;
-       const MASTER_SLAVE_SELECT     = 0b01000000;
-       const GENERATE_NMI            = 0b10000000;
+       const NAMETABLE1               = 0b00000001;
+       const NAMETABLE2               = 0b00000010;
+       const VRAM_ADD_INCREMENT       = 0b00000100;
+       const SPRITE_PATTERN_ADDR      = 0b00001000;
+       const BACKGROUND_PATTERN_ADDR  = 0b00010000;
+       const SPRITE_SIZE              = 0b00100000;
+       const MASTER_SLAVE_SELECT      = 0b01000000;
+       const GENERATE_NMI             = 0b10000000;
    }
 }
 
@@ -43,7 +43,7 @@ impl ControlRegister {
     }
 
     pub fn bknd_pattern_addr(&self) -> u16 {
-        if !self.contains(ControlRegister::BACKROUND_PATTERN_ADDR) {
+        if !self.contains(ControlRegister::BACKGROUND_PATTERN_ADDR) {
             0
         } else {
             0x1000
@@ -59,7 +59,7 @@ impl ControlRegister {
     }
 
     pub fn master_slave_select(&self) -> u8 {
-        if !self.contains(ControlRegister::SPRITE_SIZE) {
+        if !self.contains(ControlRegister::MASTER_SLAVE_SELECT) {
             0
         } else {
             1

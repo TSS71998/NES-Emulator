@@ -6,15 +6,15 @@ const SPIN_MARGIN: Duration = Duration::from_micros(2000);
 
 pub struct FrameLimiter {
     frame_time: Duration,
-    next_frame: Instant
+    next_frame: Instant,
 }
 
 impl FrameLimiter {
     pub fn new(fps: f64) -> Self {
-        let frame_time = Duration::from_secs_f64(1.0/ fps);
-        FrameLimiter{
+        let frame_time = Duration::from_secs_f64(1.0 / fps);
+        FrameLimiter {
             frame_time,
-            next_frame: Instant::now() + frame_time
+            next_frame: Instant::now() + frame_time,
         }
     }
 

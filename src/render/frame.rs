@@ -1,5 +1,5 @@
 pub struct Frame {
-    pub data: Vec<u8>
+    pub data: Vec<u8>,
 }
 
 impl Frame {
@@ -8,7 +8,7 @@ impl Frame {
 
     pub fn new() -> Self {
         Frame {
-            data: vec![0; (Frame::WIDTH) * (Frame::HEIGHT) *  3]
+            data: vec![0; (Frame::WIDTH) * (Frame::HEIGHT) * 3],
         }
     }
 

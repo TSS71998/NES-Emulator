@@ -8,14 +8,18 @@ const CHR_ROM_PAGE_SIZE: usize = 8192;
 pub enum Mirroring {
     Vertical,
     Horizontal,
-    FourScreen
+    FourScreen,
+    /// All four nametables show the first 1 KiB of VRAM (mapper-controlled).
+    SingleScreenLower,
+    /// All four nametables show the second 1 KiB of VRAM (mapper-controlled).
+    SingleScreenUpper,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum RomFormat {
     INes,
     ArchaicINes,
-    Nes2
+    Nes2,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -23,7 +27,7 @@ pub enum ConsoleType {
     Nes,
     VsSystem,
     Playchoice10,
-    Extended(u8)
+    Extended(u8),
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -31,7 +35,7 @@ pub enum Timing {
     Ntsc,
     Pal,
     MultiRegion,
-    Dendy
+    Dendy,
 }
 
 pub struct Rom {
@@ -65,9 +69,9 @@ impl Rom {
         let has_battery = raw[6] & 0b10 != 0;
         let vertical_mirroring = raw[6] & 0b1 != 0;
         let screen_mirroring = match (four_screen, vertical_mirroring) {
-            (true, _ ) => Mirroring::FourScreen,
+            (true, _) => Mirroring::FourScreen,
             (false, true) => Mirroring::Vertical,
-            (false, false) => Mirroring::Horizontal
+            (false, false) => Mirroring::Horizontal,
         };
 
         let (prg_rom_size, chr_rom_size) = match format {
@@ -75,15 +79,21 @@ impl Rom {
                 nes2_rom_size(raw[4], raw[9] & 0x0f, PRG_ROM_PAGE_SIZE)?,
                 nes2_rom_size(raw[5], raw[9] >> 4, CHR_ROM_PAGE_SIZE)?,
             ),
-            _ => (raw[4] as usize * PRG_ROM_PAGE_SIZE, raw[5] as usize * CHR_ROM_PAGE_SIZE)
+            _ => (
+                raw[4] as usize * PRG_ROM_PAGE_SIZE,
+                raw[5] as usize * CHR_ROM_PAGE_SIZE,
+            ),
         };
 
         let mapper_lo = (raw[6] >> 4) as u16;
         let mapper_mid = (raw[7] & 0xf0) as u16;
         let (mapper, submapper) = match format {
-            RomFormat::Nes2 => (mapper_lo | mapper_mid | ((raw[8] & 0x0f) as u16) << 8, raw[8] >> 4),
+            RomFormat::Nes2 => (
+                mapper_lo | mapper_mid | ((raw[8] & 0x0f) as u16) << 8,
+                raw[8] >> 4,
+            ),
             RomFormat::INes => (mapper_lo | mapper_mid, 0),
-            RomFormat::ArchaicINes => (mapper_lo, 0)
+            RomFormat::ArchaicINes => (mapper_lo, 0),
         };
 
         let console_type = match format {
@@ -91,11 +101,11 @@ impl Rom {
                 0 => ConsoleType::Nes,
                 1 => ConsoleType::VsSystem,
                 2 => ConsoleType::Playchoice10,
-                _ => ConsoleType::Extended(raw[13] & 0x0f)
+                _ => ConsoleType::Extended(raw[13] & 0x0f),
             },
             RomFormat::INes if raw[7] & 0b01 != 0 => ConsoleType::VsSystem,
             RomFormat::INes if raw[7] & 0b10 != 0 => ConsoleType::Playchoice10,
-            _ => ConsoleType::Nes
+            _ => ConsoleType::Nes,
         };
 
         let timing = match format {
@@ -103,16 +113,16 @@ impl Rom {
                 0 => Timing::Ntsc,
                 1 => Timing::Pal,
                 2 => Timing::MultiRegion,
-                _ => Timing::Dendy
+                _ => Timing::Dendy,
             },
             RomFormat::INes if raw[9] & 1 != 0 => Timing::Pal,
-            _ => Timing::Ntsc
+            _ => Timing::Ntsc,
         };
 
         let (prg_ram_size, prg_nvram_size, chr_ram_size, chr_nvram_size) = match format {
             RomFormat::Nes2 => (
                 // byte 10: PRG-RAM (low nibble) / PRG-NVRAM (high nibble) shift counts
-            // byte 11: CHR-RAM (low nibble) / CHR-NVRAM (high nibble) shift counts
+                // byte 11: CHR-RAM (low nibble) / CHR-NVRAM (high nibble) shift counts
                 ram_size_from_shift(raw[10] & 0x0f),
                 ram_size_from_shift(raw[10] >> 4),
                 ram_size_from_shift(raw[11] & 0x0f),
@@ -121,9 +131,17 @@ impl Rom {
             // iNES has no reliable RAM fields: byte 8 is PRG-RAM in 8 KiB units
             // (0 means 8 KiB), and a cart with no CHR-ROM has 8 KiB of CHR-RAM.
             _ => {
-                let prg_ram = if format == RomFormat::INes { (raw[8].max(1)) as usize * 8192 } else { 8192 };
+                let prg_ram = if format == RomFormat::INes {
+                    (raw[8].max(1)) as usize * 8192
+                } else {
+                    8192
+                };
                 let chr_ram = if chr_rom_size == 0 { 8192 } else { 0 };
-                if has_battery { (0, prg_ram, chr_ram, 0) } else { (prg_ram, 0, chr_ram, 0) }
+                if has_battery {
+                    (0, prg_ram, chr_ram, 0)
+                } else {
+                    (prg_ram, 0, chr_ram, 0)
+                }
             }
         };
 
@@ -136,7 +154,9 @@ impl Rom {
             _ => {
                 return Err(format!(
                     "ROM file is truncated: the header describes {} KiB of PRG-ROM and {} KiB of CHR-ROM, but the file is only {} bytes",
-                    prg_rom_size / 1024, chr_rom_size / 1024, raw.len()
+                    prg_rom_size / 1024,
+                    chr_rom_size / 1024,
+                    raw.len()
                 ));
             }
         }
@@ -163,7 +183,7 @@ fn detect_format(raw: &[u8]) -> RomFormat {
     match raw[7] & 0x0c {
         0x08 if nes2_sizes_fit(raw) => RomFormat::Nes2,
         0x00 if raw[12..16].iter().all(|&b| b == 0) => RomFormat::INes,
-        _ => RomFormat::ArchaicINes
+        _ => RomFormat::ArchaicINes,
     }
 }
 
@@ -173,7 +193,7 @@ fn nes2_sizes_fit(raw: &[u8]) -> bool {
     let chr = nes2_rom_size(raw[5], raw[9] >> 4, CHR_ROM_PAGE_SIZE);
     match (prg, chr) {
         (Ok(prg), Ok(chr)) => rom_end(trainer_size, prg, chr).map_or(false, |end| end <= raw.len()),
-        _ => false
+        _ => false,
     }
 }
 
@@ -201,21 +221,23 @@ fn ram_size_from_shift(shift: u8) -> usize {
     if shift == 0 { 0 } else { 64 << shift }
 }
 
+#[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::mapper::{self, SharedMapper};
 
     struct TestRom {
         header: Vec<u8>,
         trainer: Option<Vec<u8>>,
-        pgp_rom: Vec<u8>,
-        chr_rom: Vec<u8>
+        prg_rom: Vec<u8>,
+        chr_rom: Vec<u8>,
     }
 
     fn create_rom(rom: TestRom) -> Vec<u8> {
         let mut result = Vec::with_capacity(
             rom.header.len()
                 + rom.trainer.as_ref().map_or(0, |t| t.len())
-                + rom.pgp_rom.len()
+                + rom.prg_rom.len()
                 + rom.chr_rom.len(),
         );
 
@@ -224,26 +246,31 @@ pub mod test {
             result.extend(t);
         }
 
-        result.extend(&rom.pgp_rom);
+        result.extend(&rom.prg_rom);
         result.extend(&rom.chr_rom);
 
         result
     }
 
-    pub fn test_rom() -> Rom {
-        test_rom_containing(vec![])
+    pub fn test_mapper() -> SharedMapper {
+        test_mapper_containing(vec![])
+    }
+
+    /// NROM cartridge with `program` at $8000 and the rest of the 32 KiB zero-filled.
+    pub fn test_mapper_containing(program: Vec<u8>) -> SharedMapper {
+        mapper::from_rom(test_rom_containing(program)).unwrap()
     }
 
     pub fn test_rom_containing(program: Vec<u8>) -> Rom {
-        let mut pgp_rom_contents = program;
-        pgp_rom_contents.resize(2 * PRG_ROM_PAGE_SIZE, 0);
+        let mut prg_rom_contents = program;
+        prg_rom_contents.resize(2 * PRG_ROM_PAGE_SIZE, 0);
 
         let test_rom = create_rom(TestRom {
             header: vec![
-                0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x31, 00, 00, 00, 00, 00, 00, 00, 00, 00,
+                0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x01, 00, 00, 00, 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: pgp_rom_contents,
+            prg_rom: prg_rom_contents,
             chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
         });
 
@@ -257,7 +284,7 @@ pub mod test {
                 0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x31, 00, 00, 00, 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
             chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
         });
 
@@ -274,8 +301,7 @@ pub mod test {
     fn test_nes2_header() {
         let test_rom = create_rom(TestRom {
             header: vec![
-                0x4E, 0x45, 0x53, 0x1A,
-                0x02, // 2 x 16 KiB PRG-ROM
+                0x4E, 0x45, 0x53, 0x1A, 0x02, // 2 x 16 KiB PRG-ROM
                 0x01, // 1 x 8 KiB CHR-ROM
                 0x31, // mapper bits 0-3 = 3, vertical mirroring
                 0x08, // NES 2.0 identifier, mapper bits 4-7 = 0
@@ -287,7 +313,7 @@ pub mod test {
                 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
             chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
         });
 
@@ -311,15 +337,13 @@ pub mod test {
     fn test_nes2_exponent_rom_size() {
         let test_rom = create_rom(TestRom {
             header: vec![
-                0x4E, 0x45, 0x53, 0x1A,
-                0x02,
+                0x4E, 0x45, 0x53, 0x1A, 0x02,
                 0x34, // with MSB nibble $F: 2^13 * 1 = 8 KiB of CHR-ROM
-                0x00, 0x08, 0x00,
-                0xF0, // CHR size uses exponent-multiplier notation
+                0x00, 0x08, 0x00, 0xF0, // CHR size uses exponent-multiplier notation
                 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
             chr_rom: vec![2; 8192],
         });
 
@@ -332,7 +356,10 @@ pub mod test {
 
     #[test]
     fn test_nes2_rom_size_encodings() {
-        assert_eq!(nes2_rom_size(0x02, 0x1, PRG_ROM_PAGE_SIZE), Ok(0x102 * PRG_ROM_PAGE_SIZE));
+        assert_eq!(
+            nes2_rom_size(0x02, 0x1, PRG_ROM_PAGE_SIZE),
+            Ok(0x102 * PRG_ROM_PAGE_SIZE)
+        );
         // 0b000111_01: 2^7 * (1 * 2 + 1) = 384 bytes
         assert_eq!(nes2_rom_size(0x1D, 0xF, PRG_ROM_PAGE_SIZE), Ok(384));
         // 2^63 * 7 doesn't fit in usize
@@ -347,7 +374,7 @@ pub mod test {
                 0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x31, 0x18, 00, 0x01, 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
             chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
         });
 
@@ -365,7 +392,7 @@ pub mod test {
         let test_rom = create_rom(TestRom {
             header,
             trainer: None,
-            pgp_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
             chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
         });
 
@@ -383,7 +410,7 @@ pub mod test {
                 0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x31, 00, 00, 00, 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            pgp_rom: vec![1; 1 * PRG_ROM_PAGE_SIZE], // header says 2 pages
+            prg_rom: vec![1; 1 * PRG_ROM_PAGE_SIZE], // header says 2 pages
             chr_rom: vec![],
         });
 

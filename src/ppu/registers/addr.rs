@@ -1,12 +1,10 @@
 pub struct AddrRegister {
-    value: (u8, u8)
+    value: (u8, u8),
 }
 
 impl AddrRegister {
     pub fn new() -> Self {
-        AddrRegister {
-            value: (0, 0)
-        }
+        AddrRegister { value: (0, 0) }
     }
 
     fn set(&mut self, data: u16) {

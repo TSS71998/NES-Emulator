@@ -1,30 +1,28 @@
+pub mod apu;
+pub mod audio;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
+pub mod frame_limiter;
+pub mod joypad;
 pub mod opcodes;
-pub mod trace;
 pub mod ppu;
 pub mod render;
-pub mod joypad;
-pub mod apu;
-pub mod frame_limiter;
-pub mod audio;
+pub mod trace;
+pub mod mapper;
 
+use audio::AudioOutput;
 use bus::Bus;
 use cartridge::Rom;
 use cpu::CPU;
-use render::frame::Frame;
-use ppu::NesPPU;
-use audio::AudioOutput;
 use frame_limiter::FrameLimiter;
+use ppu::NesPPU;
+use render::frame::Frame;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
 use std::collections::HashMap;
-
-#[macro_use]
-extern crate lazy_static;
 
 #[macro_use]
 extern crate bitflags;
@@ -33,7 +31,7 @@ fn main() {
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
     let window = video_subsystem
-        .window("Tile viewer", (256.0 * 3.0) as u32, (240.0 * 3.0) as u32)
+        .window("NES Emulator", (256.0 * 3.0) as u32, (240.0 * 3.0) as u32)
         .position_centered()
         .build()
         .unwrap();
@@ -65,8 +63,12 @@ fn main() {
         .create_texture_target(PixelFormatEnum::RGB24, 256, 240)
         .unwrap();
 
-    let bytes: Vec<u8> = std::fs::read("ff.nes").unwrap();
-    let rom = Rom::new(&bytes).unwrap();
+    let rom_arg = std::env::args().nth(1).unwrap_or_else(|| "smb.nes".to_string());
+    let rom_path = find_rom(&rom_arg);
+    let bytes: Vec<u8> = std::fs::read(&rom_path)
+        .unwrap_or_else(|e| exit_with_error(&format!("can't read {}: {}", rom_path.display(), e)));
+    let rom = Rom::new(&bytes).unwrap_or_else(|e| exit_with_error(&e));
+    let cartridge = mapper::from_rom(rom).unwrap_or_else(|e| exit_with_error(&e));
 
     let mut frame = Frame::new();
 
@@ -81,7 +83,8 @@ fn main() {
     key_map.insert(Keycode::S, joypad::JoypadButton::BUTTON_B);
 
     // run the game cycle
-    let mut bus = Bus::new(rom, move |ppu: &NesPPU, joypad: &mut joypad::Joypad| {
+    let mut bus = Bus::new(cartridge, move |ppu: &NesPPU, joypads: &mut [joypad::Joypad; 2]| {
+        let joypad = &mut joypads[0];
         render::render(ppu, &mut frame);
         texture.update(None, &frame.data, 256 * 3).unwrap();
 
@@ -99,25 +102,42 @@ fn main() {
                     ..
                 } => std::process::exit(0),
 
-                Event::KeyDown {keycode, ..} => {
+                Event::KeyDown { keycode, .. } => {
                     if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
                         joypad.set_button_pressed_status(*key, true);
                     }
                 }
-                Event::KeyUp {keycode, ..} => {
+                Event::KeyUp { keycode, .. } => {
                     if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
                         joypad.set_button_pressed_status(*key, false);
                     }
                 }
                 _ => { /* do nothing */ }
             }
-         }
+        }
     });
 
-    bus.set_audio_callback(sample_rate, move |samples: &[f32]| audio_output.push(samples));
+    bus.set_audio_callback(sample_rate, move |samples: &[f32]| {
+        audio_output.push(samples)
+    });
 
     let mut cpu = CPU::new(bus);
 
     cpu.reset();
     cpu.run();
+}
+
+fn exit_with_error(message: &str) -> ! {
+    eprintln!("error: {}", message);
+    std::process::exit(1);
+}
+
+fn find_rom(name: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(name);
+    let in_roms = std::path::Path::new("roms").join(path);
+    if !path.exists() && in_roms.exists() {
+        in_roms
+    } else {
+        path.to_path_buf()
+    }
 }

@@ -1,4 +1,5 @@
 use crate::cartridge::Mirroring;
+use crate::mapper::SharedMapper;
 use registers::addr::AddrRegister;
 use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
@@ -8,9 +9,9 @@ use registers::status::StatusRegister;
 pub mod registers;
 
 pub struct NesPPU {
-    pub chr_rom: Vec<u8>,
+    mapper: SharedMapper,
     pub palette_table: [u8; 32],
-    pub vram: [u8; 2048],
+    pub vram: [u8; 4096],
 
     pub addr: AddrRegister,
     pub ctrl: ControlRegister,
@@ -25,11 +26,10 @@ pub struct NesPPU {
     odd_frame: bool,
     render_y_bump: u16,
 
-    pub mirroring: Mirroring,
     internal_data_buf: u8,
     pub scanlines: u16,
     cycles: usize,
-    pub nmi_interrupt: Option<u8>,
+    pub nmi_pending: bool,
     // (scroll_x, scroll_y, nametable_addr) in effect for each visible scanline,
     // so mid-frame scroll splits (e.g. SMB status bar) render correctly
     pub scanline_scroll: [(u8, u8, u16); 240],
@@ -50,18 +50,17 @@ pub trait PPU {
 }
 
 impl NesPPU {
-    pub fn new(chr_rom: Vec<u8>, mirroring: Mirroring) -> Self {
+    pub fn new(mapper: SharedMapper) -> Self {
         NesPPU {
-            chr_rom: chr_rom,
-            mirroring: mirroring,
-            vram: [0; 2048],
+            mapper,
+            vram: [0; 4096],
             oam_data: [0; 64 * 4],
             oam_addr: 0,
             palette_table: [0; 32],
             internal_data_buf: 0,
             cycles: 0,
             scanlines: 0,
-            nmi_interrupt: None,
+            nmi_pending: false,
             scanline_scroll: [(0, 0, 0x2000); 240],
             write_latch: false,
             odd_frame: false,
@@ -75,8 +74,42 @@ impl NesPPU {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_mirroring(mirroring: Mirroring) -> Self {
+        use crate::mapper::Nrom;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let cart = Nrom::from_parts(vec![0; 0x4000], vec![0; 0x2000], mirroring);
+        NesPPU::new(Rc::new(RefCell::new(cart)))
+    }    
+
+    #[cfg(test)]
     pub fn new_empty_rom() -> Self {
-        NesPPU::new(vec![0; 2048], Mirroring::Horizontal)
+        NesPPU::with_mirroring(Mirroring::Horizontal)
+    }
+
+    pub fn chr_read(&self, addr:u16) -> u8 {
+        self.mapper.borrow().ppu_read(addr)
+    }
+
+    pub fn mirroring(&self) -> Mirroring {
+        self.mapper.borrow().mirroring()
+    }
+
+    /// Pattern-table address of the low bitplane for `row` of a sprite's tile
+    /// (the high plane is 8 bytes later). `row` is counted from the top of the
+    /// sprite after any vertical flip, and may be 0-15 for 8x16 sprites.
+    pub fn sprite_row_addr(&self, tile_idx: u8, row: usize) -> u16 {
+        let row = row as u16;
+        if self.ctrl.sprite_size() == 16 {
+            // 8x16: bit 0 of the tile index picks the pattern table, and the
+            // bottom half of the sprite is the next tile
+            let bank = (tile_idx as u16 & 1) * 0x1000;
+            let tile = (tile_idx as u16 & 0xFE) + row / 8;
+            bank + tile * 16 + row % 8
+        } else {
+            self.ctrl.sprt_pattern_addr() + tile_idx as u16 * 16 + row
+        }
     }
 
     fn is_rendering(&self) -> bool {
@@ -103,23 +136,29 @@ impl NesPPU {
         (self.scroll.scroll_x, y as u8, nametable)
     }
 
+    /// Maps a nametable address ($2000-$3EFF) to an index into `vram`
     pub fn mirror_vram_addr(&self, addr: u16) -> u16 {
-        let mirrored_vram = addr & 0b10111111111111;
-        let vram_index = mirrored_vram - 0x2000;
+        let vram_index = (addr & 0x2FFF) - 0x2000;
         let name_table = vram_index / 0x400;
-        match (&self.mirroring, name_table) {
+        let offset = vram_index & 0x3FF;
+        match (self.mirroring(), name_table) {
             (Mirroring::Vertical, 2) | (Mirroring::Vertical, 3) => vram_index - 0x800,
-            (Mirroring::Horizontal, 2) => vram_index - 0x400,
-            (Mirroring::Horizontal, 1) => vram_index - 0x400,
+            (Mirroring::Horizontal, 1) | (Mirroring::Horizontal, 2) => vram_index - 0x400,
             (Mirroring::Horizontal, 3) => vram_index - 0x800,
-            _ => vram_index
-        } 
-    }  
+            (Mirroring::SingleScreenLower, _) => offset,
+            (Mirroring::SingleScreenUpper, _) => 0x400 + offset,
+            _ => vram_index,
+        }
+    }
 
     pub fn tick(&mut self, cycles: u8) -> bool {
         self.cycles += cycles as usize;
         let rendering = self.mask.show_background() || self.mask.show_sprites();
-        let line_len = if self.scanlines == 261 && self.odd_frame && rendering { 340 } else { 341 }; 
+        let line_len = if self.scanlines == 261 && self.odd_frame && rendering {
+            340
+        } else {
+            341
+        };
 
         if self.cycles >= line_len {
             if self.is_sprite_0_hit() {
@@ -132,19 +171,19 @@ impl NesPPU {
 
             self.cycles = self.cycles - line_len;
             self.scanlines += 1;
-            
+
             if self.scanlines == 241 {
                 self.status.set_vblank_status(true);
                 self.status.set_sprite_zero_hit(false);
                 if self.ctrl.generate_vblank_nmi() {
-                    self.nmi_interrupt = Some(1);
+                    self.nmi_pending = true;
                 }
             }
 
             if self.scanlines >= 262 {
                 self.scanlines = 0;
                 self.odd_frame = !self.odd_frame;
-                self.nmi_interrupt = None;
+                self.nmi_pending = false;
                 self.render_y_bump = 0;
                 self.status.set_sprite_zero_hit(false);
                 self.status.reset_vblank_status();
@@ -152,12 +191,17 @@ impl NesPPU {
             }
         }
         return false;
-    } 
+    }
 
     /// Returns the logical nametable's offset into vram, the tile column/row and the
     /// 2-bit pixel value of the background at a screen position for the given
     /// (scroll_x, scroll_y, nametable_addr).
-    pub fn bg_pixel(&self, screen_x: usize, screen_y: usize, scroll: (u8, u8, u16)) -> (usize, usize, usize, u8) {
+    pub fn bg_pixel(
+        &self,
+        screen_x: usize,
+        screen_y: usize,
+        scroll: (u8, u8, u16),
+    ) -> (usize, usize, usize, u8) {
         let (scroll_x, scroll_y, nametable_addr) = scroll;
         let base_nt = ((nametable_addr - 0x2000) / 0x400) as usize;
 
@@ -174,12 +218,12 @@ impl NesPPU {
         // mirror_vram_addr maps the logical nametable onto physical vram
         let nt_start = self.mirror_vram_addr(0x2000 + ((nt_y * 2 + nt_x) * 0x400) as u16) as usize;
         let tile_idx = self.vram[nt_start + tile_row * 32 + tile_column] as usize;
-        let tile = self.ctrl.bknd_pattern_addr() as usize + tile_idx * 16;
+        let row_addr = self.ctrl.bknd_pattern_addr() + (tile_idx * 16 + y % 8) as u16;
 
         let shift = 7 - (x % 8);
-        let upper = (self.chr_rom[tile + y % 8] >> shift) & 1;
-        let lower = (self.chr_rom[tile + y % 8 + 8] >> shift) & 1;
-        (nt_start, tile_column, tile_row, lower << 1 | upper)
+        let low_plane = (self.chr_read(row_addr) >> shift) & 1;
+        let high_plane = (self.chr_read(row_addr + 8) >> shift) & 1;
+        (nt_start, tile_column, tile_row, high_plane << 1 | low_plane)
     }
 
     // Sprite 0 hit is set on the first pixel where an opaque sprite 0 pixel
@@ -204,14 +248,9 @@ impl NesPPU {
             row = height - 1 - row;
         }
 
-        let tile_idx = self.oam_data[1] as usize;
-        let tile = if height == 16 {
-            // 8x16: bank from bit 0 of the tile index, bottom half is the next tile
-            (tile_idx & 1) * 0x1000 + (tile_idx & 0xfe) * 16 + (row / 8) * 16
-        } else {
-            self.ctrl.sprt_pattern_addr() as usize + tile_idx * 16
-        };
-        let row = row % 8;
+        let row_addr = self.sprite_row_addr(self.oam_data[1], row);
+        let low_plane = self.chr_read(row_addr);
+        let high_plane = self.chr_read(row_addr + 8);
 
         let scroll = self.current_scroll();
         for col in 0..8 {
@@ -221,17 +260,16 @@ impl NesPPU {
                 break;
             }
             let shift = if attr >> 6 & 1 == 1 { col } else { 7 - col };
-            let upper = (self.chr_rom[tile + row] >> shift) & 1;
-            let lower = (self.chr_rom[tile + row + 8] >> shift) & 1;
-            if (lower << 1 | upper) != 0 && self.bg_pixel(x, line, scroll).3 != 0 {
+            let pixel = ((high_plane >> shift) & 1) << 1 | ((low_plane >> shift) & 1);
+            if pixel != 0 && self.bg_pixel(x, line, scroll).3 != 0 {
                 return true;
             }
         }
         false
     }
 
-    pub fn poll_nmi_interrupt(&mut self) -> Option<u8> {
-        self.nmi_interrupt.take()
+    pub fn poll_nmi_interrupt(&mut self) -> bool {
+        std::mem::take(&mut self.nmi_pending)
     }
 }
 
@@ -253,7 +291,7 @@ impl PPU for NesPPU {
         let before_nmi_status = self.ctrl.generate_vblank_nmi();
         self.ctrl.update(value);
         if !before_nmi_status && self.ctrl.generate_vblank_nmi() && self.status.is_in_vblank() {
-            self.nmi_interrupt = Some(1);
+            self.nmi_pending = true;
         }
     }
 
@@ -278,7 +316,8 @@ impl PPU for NesPPU {
     fn write_to_data(&mut self, value: u8) {
         let addr = self.addr.get();
         match addr {
-            0..=0x1fff => println!("attempt to write to chr rom space {}", addr), 
+            // CHR-RAM; the mapper ignores the write if the cartridge has CHR-ROM
+            0..=0x1fff => self.mapper.borrow_mut().ppu_write(addr, value),
             // 0x3000..=0x3eff mirrors 0x2000..=0x2eff; mirror_vram_addr folds it down
             0x2000..=0x3eff => {
                 self.vram[self.mirror_vram_addr(addr) as usize] = value;
@@ -289,8 +328,7 @@ impl PPU for NesPPU {
                 let add_mirror = addr - 0x10;
                 self.palette_table[(add_mirror - 0x3f00) as usize] = value;
             }
-            0x3f00..=0x3fff =>
-            {
+            0x3f00..=0x3fff => {
                 self.palette_table[((addr - 0x3f00) % 32) as usize] = value;
             }
             _ => panic!("unexpected access to mirrored space {}", addr),
@@ -312,21 +350,18 @@ impl PPU for NesPPU {
         match addr {
             0..=0x1fff => {
                 let result = self.internal_data_buf;
-                self.internal_data_buf = self.chr_rom[addr as usize];
+                self.internal_data_buf = self.chr_read(addr);
                 result
-            },
+            }
             0x2000..=0x3eff => {
                 let result = self.internal_data_buf;
                 self.internal_data_buf = self.vram[self.mirror_vram_addr(addr) as usize];
                 result
-            },
+            }
             0x3f10 | 0x3f14 | 0x3f18 | 0x3f1c => {
                 self.palette_table[(addr - 0x10 - 0x3f00) as usize]
             }
-            0x3f00..=0x3fff =>
-            {
-                self.palette_table[((addr - 0x3f00) % 32) as usize]
-            }
+            0x3f00..=0x3fff => self.palette_table[((addr - 0x3f00) % 32) as usize],
             _ => panic!("unexpected access to mirrored space {}", addr),
         }
     }
@@ -437,7 +472,7 @@ pub mod test {
     //   [0x2800 a ] [0x2C00 b ]
     #[test]
     fn test_vram_vertical_mirror() {
-        let mut ppu = NesPPU::new(vec![0; 2048], Mirroring::Vertical);
+        let mut ppu = NesPPU::with_mirroring(Mirroring::Vertical);
 
         ppu.write_to_ppu_addr(0x20);
         ppu.write_to_ppu_addr(0x05);
@@ -538,8 +573,50 @@ pub mod test {
 
         ppu.write_to_oam_addr(0x10);
         assert_eq!(ppu.read_oam_data(), 0x77);
-  
+
         ppu.write_to_oam_addr(0x11);
         assert_eq!(ppu.read_oam_data(), 0x66);
+    }
+
+     #[test]
+    fn test_four_screen_uses_4k_vram() {
+        let mut ppu = NesPPU::with_mirroring(Mirroring::FourScreen);
+        ppu.write_to_ppu_addr(0x2C);
+        ppu.write_to_ppu_addr(0x05);
+        ppu.write_to_data(0x66);
+        assert_eq!(ppu.vram[0x0C05], 0x66);
+    }
+
+    #[test]
+    fn test_single_screen_mirroring() {
+        let ppu = NesPPU::with_mirroring(Mirroring::SingleScreenUpper);
+        for nt in [0x2000u16, 0x2400, 0x2800, 0x2C00] {
+            assert_eq!(ppu.mirror_vram_addr(nt + 5), 0x405);
+        }
+    }
+
+    #[test]
+    fn test_chr_ram_write_and_read() {
+        use crate::mapper::Nrom;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let cart = Nrom::from_parts(vec![0; 0x4000], vec![], Mirroring::Vertical);
+        let mut ppu = NesPPU::new(Rc::new(RefCell::new(cart)));
+        ppu.write_to_ppu_addr(0x01);
+        ppu.write_to_ppu_addr(0x23);
+        ppu.write_to_data(0x5A);
+        assert_eq!(ppu.chr_read(0x0123), 0x5A);
+    }
+
+    #[test]
+    fn test_sprite_row_addr() {
+        let mut ppu = NesPPU::new_empty_rom();
+        ppu.write_to_ctrl(0b0000_1000); // 8x8 sprites from $1000
+        assert_eq!(ppu.sprite_row_addr(0x02, 3), 0x1000 + 0x20 + 3);
+
+        ppu.write_to_ctrl(0b0010_0000); // 8x16; table comes from the tile index
+        assert_eq!(ppu.sprite_row_addr(0x03, 0), 0x1000 + 0x20);
+        assert_eq!(ppu.sprite_row_addr(0x03, 9), 0x1000 + 0x30 + 1);
+        assert_eq!(ppu.sprite_row_addr(0x04, 15), 0x0000 + 0x50 + 7);
     }
 }
