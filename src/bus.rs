@@ -89,8 +89,6 @@ impl<'a> Bus<'a> {
     }
 
     pub fn tick(&mut self, cycles: u8) {
-        self.cycles += cycles as usize;
-
         for _ in 0..cycles {
             self.step_cycle();
         }
