@@ -185,7 +185,7 @@ mod test {
     fn test_power_on_fixes_last_bank_at_c000() {
         let mmc1 = Mmc1::new(banked_rom(1, 16, 0, false));
         assert_eq!(mmc1.cpu_read(0x8000), Some(0));
-        assert_eq!(mmc1.cpu_read(0xFFFF), Some(15));
+        assert_eq!(mmc1.cpu_read(0xFFFF), Some(0x8F));
     }
 
     #[test]
@@ -193,7 +193,8 @@ mod test {
         let mut mmc1 = Mmc1::new(banked_rom(1, 16, 0, false));
         load(&mut mmc1, 0xE000, 5);
         assert_eq!(mmc1.cpu_read(0x8000), Some(5));
-        assert_eq!(mmc1.cpu_read(0xBFFF), Some(5));
+        assert_eq!(mmc1.cpu_read(0xBFFF), Some(0x85));
+        assert_eq!(mmc1.cpu_read(0xFFFF), Some(0x8F));
         assert_eq!(mmc1.cpu_read(0xC000), Some(15));
     }
 

@@ -68,6 +68,7 @@ mod test {
         cnrom.cpu_write(0x8000, 2);
         assert_eq!(cnrom.ppu_read(0x0000), 16); // 8 KiB bank 2 = 1 KiB bank 16
         assert_eq!(cnrom.ppu_read(0x1C00), 23);
+        assert_eq!(cnrom.ppu_read(0x1FFF), 0x80 | 23);
         cnrom.ppu_write(0x0000, 0xFF); // CHR-ROM: ignored
         assert_eq!(cnrom.ppu_read(0x0000), 16);
     }

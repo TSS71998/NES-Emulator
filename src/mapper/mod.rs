@@ -115,15 +115,19 @@ pub(crate) mod test_util {
 
     /// A Rom for mapper tests. Each 16 KiB PRG bank is filled with its bank
     /// number and each 1 KiB CHR bank with its bank number, so a read shows
-    /// which bank is mapped.
+    /// which bank is mapped. The last byte of each bank is tagged with
+    /// `0x80 | bank` instead, so a read that lands in the right bank but at
+    /// the wrong offset fails too.
     pub fn banked_rom(mapper: u16, prg_banks: usize, chr_banks_8k: usize, has_battery: bool) -> Rom {
         let mut prg_rom = vec![0; prg_banks * 0x4000];
         for (i, b) in prg_rom.iter_mut().enumerate() {
-            *b = (i / 0x4000) as u8;
+            let bank = (i / 0x4000) as u8;            
+            *b = if i % 0x4000 == 0x3FFF { 0x80 | bank } else { bank };
         }
         let mut chr_rom = vec![0; chr_banks_8k * 0x2000];
         for (i, b) in chr_rom.iter_mut().enumerate() {
-            *b = (i / 0x400) as u8;
+            let bank = (i / 0x400) as u8;            
+            *b = if i % 0x400 == 0x3FF { 0x80 | bank } else { bank };
         }
         Rom {
             prg_rom,

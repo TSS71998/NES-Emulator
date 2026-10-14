@@ -72,6 +72,7 @@ mod test {
         axrom.cpu_write(0x8000, 0x12); // 32 KiB bank 2, upper screen
         assert_eq!(axrom.cpu_read(0x8000), Some(4));
         assert_eq!(axrom.cpu_read(0xC000), Some(5));
+        assert_eq!(axrom.cpu_read(0xFFFF), Some(0x85));
         assert_eq!(axrom.mirroring(), Mirroring::SingleScreenUpper);
     }
 }

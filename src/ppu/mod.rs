@@ -327,12 +327,8 @@ impl PPU for NesPPU {
             0x2000..=0x3eff => {
                 self.vram[self.mirror_vram_addr(addr) as usize] = value;
             }
-
-            //Addresses $3F10/$3F14/$3F18/$3F1C are mirrors of $3F00/$3F04/$3F08/$3F0C
-            0x3f10 | 0x3f14 | 0x3f18 | 0x3f1c => {
-                let add_mirror = addr - 0x10;
-                self.palette_table[(add_mirror - 0x3f00) as usize] = value;
-            }
+            // palette RAM is 6 bits wide, so only colours $00-$3F can be stored.
+            // palette_index handles the $3F10/$3F14/$3F18/$3F1C mirrors.
             0x3f00..=0x3fff => {
                 self.palette_table[palette_index(addr)] = value & 0x3F
             }
@@ -363,10 +359,7 @@ impl PPU for NesPPU {
                 self.internal_data_buf = self.vram[self.mirror_vram_addr(addr) as usize];
                 result
             }
-            0x3f10 | 0x3f14 | 0x3f18 | 0x3f1c => {
-                self.palette_table[(addr - 0x10 - 0x3f00) as usize]
-            }
-            0x3f00..=0x3fff => self.palette_table[palette_index(addr)] ,
+            0x3f00..=0x3fff => self.palette_table[palette_index(addr)],
             _ => panic!("unexpected access to mirrored space {}", addr),
         }
     }
@@ -632,6 +625,15 @@ pub mod test {
         ppu.write_to_ppu_addr(0x11);
         ppu.write_to_data(0xF0);
         assert_eq!(ppu.palette_table[0x11], 0x30);
+    }
+
+    #[test]
+    fn test_palette_mirror_write_is_masked() {
+        let mut ppu = NesPPU::new_empty_rom();
+        ppu.write_to_ppu_addr(0x3F);
+        ppu.write_to_ppu_addr(0x10); // mirror of $3F00
+        ppu.write_to_data(0xFF);
+        assert_eq!(ppu.palette_table[0x00], 0x3F);
     }
 
     #[test]

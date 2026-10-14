@@ -30,7 +30,7 @@ impl Mapper for Uxrom {
         let len = self.prg_rom.len();
         let offset = addr as usize & (PRG_BANK - 1);
         match addr {
-            0x8000..=0xBFFF => Some(self.prg_rom[bank_offset(self.bank, PRG_BANK, len)]),
+            0x8000..=0xBFFF => Some(self.prg_rom[bank_offset(self.bank, PRG_BANK, len) + offset]),
             0xC000..=0xFFFF => Some(self.prg_rom[len - PRG_BANK + offset]),
             _ => None
         }
@@ -67,9 +67,10 @@ mod test {
         assert_eq!(uxrom.cpu_read(0xC000), Some(7));
         uxrom.cpu_write(0x8000, 3);
         assert_eq!(uxrom.cpu_read(0x8000), Some(3));
-        assert_eq!(uxrom.cpu_read(0xFFFF), Some(7));
+        assert_eq!(uxrom.cpu_read(0xBFFF), Some(0x83));
+        assert_eq!(uxrom.cpu_read(0xFFFF), Some(0x87));
         uxrom.cpu_write(0xFFFF, 9); // wraps to bank 1 on an 8-bank cart
-        assert_eq!(uxrom.cpu_read(0xBFFF), Some(1));
+        assert_eq!(uxrom.cpu_read(0xBFFF), Some(0x81));
     }
 
     #[test]

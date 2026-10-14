@@ -29,8 +29,8 @@ use std::collections::HashMap;
 #[macro_use]
 extern crate bitflags;
 
-const OVERSCANE_LINES: u32 = 8;
-const VISIBLE_LINES: u32 = 240 - 2 * OVERSCANE_LINES;
+const OVERSCAN_LINES: u32 = 8;
+const VISIBLE_LINES: u32 = 240 - 2 * OVERSCAN_LINES;
 const SCALE: u32 = 3;
 
 fn main() {
@@ -100,7 +100,7 @@ fn main() {
         render::render(ppu, &mut frame);
         texture.update(None, &frame.data, 256 * 3).unwrap();
 
-        let visible = Rect::new(0, OVERSCANE_LINES as i32, 256, VISIBLE_LINES);
+        let visible = Rect::new(0, OVERSCAN_LINES as i32, 256, VISIBLE_LINES);
         canvas.copy(&texture, visible, None).unwrap();
 
         if !use_vsync {
