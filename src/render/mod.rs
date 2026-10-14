@@ -68,8 +68,8 @@ pub fn render(ppu: &NesPPU, frame: &mut Frame) {
         let tile_y = ppu.oam_data[i] as usize + 1;
 
         let attr = ppu.oam_data[i + 2];
-        let filp_vertical = attr >> 7 & 1 == 1;
-        let filp_horizontal = attr >> 6 & 1 == 1;
+        let flip_vertical = attr >> 7 & 1 == 1;
+        let flip_horizontal = attr >> 6 & 1 == 1;
 
         let palette_idx = attr & 0b11;
         let sprite_palette = sprite_palette(ppu, palette_idx);
@@ -87,8 +87,8 @@ pub fn render(ppu: &NesPPU, frame: &mut Frame) {
                     continue;
                 }
                 let rgb = palette::SYSTEM_PALETTE[sprite_palette[value as usize] as usize];
-                let px = if filp_horizontal { tile_x + 7 - x } else { tile_x + x };
-                let py = if filp_vertical { tile_y + height - y } else { tile_y + y };
+                let px = if flip_horizontal { tile_x + 7 - x } else { tile_x + x };
+                let py = if flip_vertical { tile_y + height - 1 - y } else { tile_y + y };
                 frame.set_pixel(px, py, rgb);
             }
         }

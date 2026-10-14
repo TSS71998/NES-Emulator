@@ -16,22 +16,28 @@ use bus::Bus;
 use cartridge::Rom;
 use cpu::CPU;
 use frame_limiter::FrameLimiter;
+use mapper::SharedMapper;
 use ppu::NesPPU;
 use render::frame::Frame;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::PixelFormatEnum;
+use sdl2::rect::Rect;
 use std::collections::HashMap;
 
 #[macro_use]
 extern crate bitflags;
 
+const OVERSCANE_LINES: u32 = 8;
+const VISIBLE_LINES: u32 = 240 - 2 * OVERSCANE_LINES;
+const SCALE: u32 = 3;
+
 fn main() {
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
     let window = video_subsystem
-        .window("NES Emulator", (256.0 * 3.0) as u32, (240.0 * 3.0) as u32)
+        .window("NES Emulator", 256 * SCALE, VISIBLE_LINES * SCALE)
         .position_centered()
         .build()
         .unwrap();
@@ -51,7 +57,6 @@ fn main() {
     }
     let mut canvas = canvas_builder.build().unwrap();
     let mut event_pump = sdl_context.event_pump().unwrap();
-    canvas.set_scale(3.0, 3.0).unwrap();
 
     let audio_subsystem = sdl_context.audio().unwrap();
     let mut audio_output = AudioOutput::new(&audio_subsystem);
@@ -70,6 +75,12 @@ fn main() {
     let rom = Rom::new(&bytes).unwrap_or_else(|e| exit_with_error(&e));
     let cartridge = mapper::from_rom(rom).unwrap_or_else(|e| exit_with_error(&e));
 
+    let save_path = rom_path.with_extension("sav");
+    if let Ok(data) = std::fs::read(&save_path) {
+        cartridge.borrow_mut().load_battery_ram(&data);
+    }
+    let mut saver = BatterySaver::new(cartridge.clone(), save_path);
+
     let mut frame = Frame::new();
 
     let mut key_map = HashMap::new();
@@ -85,10 +96,12 @@ fn main() {
     // run the game cycle
     let mut bus = Bus::new(cartridge, move |ppu: &NesPPU, joypads: &mut [joypad::Joypad; 2]| {
         let joypad = &mut joypads[0];
+        saver.on_frame();
         render::render(ppu, &mut frame);
         texture.update(None, &frame.data, 256 * 3).unwrap();
 
-        canvas.copy(&texture, None, None).unwrap();
+        let visible = Rect::new(0, OVERSCANE_LINES as i32, 256, VISIBLE_LINES);
+        canvas.copy(&texture, visible, None).unwrap();
 
         if !use_vsync {
             frame_limiter.wait();
@@ -100,8 +113,10 @@ fn main() {
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
-                } => std::process::exit(0),
-
+                } => {
+                    saver.save();
+                    std::process::exit(0)
+                }
                 Event::KeyDown { keycode, .. } => {
                     if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
                         joypad.set_button_pressed_status(*key, true);
@@ -139,5 +154,41 @@ fn find_rom(name: &str) -> std::path::PathBuf {
         in_roms
     } else {
         path.to_path_buf()
+    }
+}
+
+struct BatterySaver {
+    cartridge: SharedMapper,
+    path: std::path::PathBuf,
+    last_saved: Vec<u8>,
+    frames: u32
+}
+
+impl BatterySaver {
+    const SAVE_INTERVAL_FRAMES: u32 = 300;
+
+    fn new(cartridge: SharedMapper, path: std::path::PathBuf) -> Self {
+        let last_saved = cartridge.borrow().battery_ram().map(|r| r.to_vec()).unwrap_or_default();
+        BatterySaver { cartridge, path, last_saved, frames: 0 }
+    }
+
+    fn on_frame(&mut self) {
+        self.frames += 1;
+        if self.frames >= Self::SAVE_INTERVAL_FRAMES {
+            self.frames = 0;
+            self.save();
+        }
+    }
+
+    fn save(&mut self) {
+        let cartridge = self.cartridge.borrow();
+        let Some(ram) = cartridge.battery_ram() else { return };
+        if ram == &self.last_saved[..] {
+            return;
+        }
+        match std::fs::write(&self.path, ram) {
+            Ok(()) => self.last_saved = ram.to_vec(),
+            Err(e) => eprintln!("warning: couldn't write {}: {}", self.path.display(), e)
+        }
     }
 }

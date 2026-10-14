@@ -117,7 +117,7 @@ mod interrupt {
         cpu_cycles: 7,
     };
 
-    pub(super) const IQR: Interrupt = Interrupt {
+    pub(super) const IRQ: Interrupt = Interrupt {
         itype: InterruptType::IRQ,
         vector_addr: 0xFFFE,
         b_flag_mask: 0b00100000,
@@ -166,7 +166,7 @@ fn resolve_address(
             (addr, page_cross(base, addr))
         }
         AddressingMode::Indirect_X => {
-            let ptr = read(addr).wrapping_add(1);
+            let ptr = read(addr).wrapping_add(x);
             (pointer(&mut read, ptr as u16, ptr.wrapping_add(1) as u16), false)
         }
         AddressingMode::Indirect_Y => {
@@ -688,7 +688,7 @@ impl<'a> CPU<'a> {
         if self.bus.poll_nmi_status() {
             self.interrupt(interrupt::NMI);
         } else if self.bus.irq_pending() && !self.status.contains(CpuFlags::INTERRUPT_DISABLE) {
-            self.interrupt(interrupt::IQR);
+            self.interrupt(interrupt::IRQ);
         }
     }
 
@@ -1221,7 +1221,7 @@ impl<'a> CPU<'a> {
             /* SHY */
             0x9c => {
                 let mem_address = self.mem_read_u16(self.program_counter).wrapping_add(self.register_x as u16);
-                let data = self.register_x & ((mem_address >> 8) as u8).wrapping_add(1);
+                let data = self.register_y & ((mem_address >> 8) as u8).wrapping_add(1);
                 self.mem_write(mem_address, data)
             }
         }

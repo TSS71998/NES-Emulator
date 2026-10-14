@@ -273,6 +273,11 @@ impl NesPPU {
     }
 }
 
+fn palette_index(addr: u16) -> usize {
+    let index = (addr & 0x1F) as usize;
+    if index & 0x13 == 0x10 { index & 0x0F } else { index } 
+}
+
 impl PPU for NesPPU {
     fn write_to_ppu_addr(&mut self, value: u8) {
         let first_write = !self.write_latch;
@@ -329,7 +334,7 @@ impl PPU for NesPPU {
                 self.palette_table[(add_mirror - 0x3f00) as usize] = value;
             }
             0x3f00..=0x3fff => {
-                self.palette_table[((addr - 0x3f00) % 32) as usize] = value;
+                self.palette_table[palette_index(addr)] = value & 0x3F
             }
             _ => panic!("unexpected access to mirrored space {}", addr),
         }
@@ -361,7 +366,7 @@ impl PPU for NesPPU {
             0x3f10 | 0x3f14 | 0x3f18 | 0x3f1c => {
                 self.palette_table[(addr - 0x10 - 0x3f00) as usize]
             }
-            0x3f00..=0x3fff => self.palette_table[((addr - 0x3f00) % 32) as usize],
+            0x3f00..=0x3fff => self.palette_table[palette_index(addr)] ,
             _ => panic!("unexpected access to mirrored space {}", addr),
         }
     }
@@ -618,5 +623,27 @@ pub mod test {
         assert_eq!(ppu.sprite_row_addr(0x03, 0), 0x1000 + 0x20);
         assert_eq!(ppu.sprite_row_addr(0x03, 9), 0x1000 + 0x30 + 1);
         assert_eq!(ppu.sprite_row_addr(0x04, 15), 0x0000 + 0x50 + 7);
+    }
+
+    #[test]
+    fn test_palette_stores_only_6_bits() {
+        let mut ppu = NesPPU::new_empty_rom();
+        ppu.write_to_ppu_addr(0x3F);
+        ppu.write_to_ppu_addr(0x11);
+        ppu.write_to_data(0xF0);
+        assert_eq!(ppu.palette_table[0x11], 0x30);
+    }
+
+    #[test]
+    fn test_palette_mirrors() {
+        let mut ppu = NesPPU::new_empty_rom();
+        ppu.write_to_ppu_addr(0x3F);
+        ppu.write_to_ppu_addr(0x30); // mirror of $3F10, which mirrors $3F00
+        ppu.write_to_data(0x21);
+        assert_eq!(ppu.palette_table[0x00], 0x21);
+
+        ppu.write_to_ppu_addr(0x3F);
+        ppu.write_to_ppu_addr(0x10);
+        assert_eq!(ppu.read_data(), 0x21);
     }
 }
