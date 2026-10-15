@@ -13,13 +13,13 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - **Timing**: runs at the NTSC rate of 60.0988 frames per second. The CPU stalls for OAM DMA (513–514 cycles) and DMC sample fetches like the real hardware.
 - **Audio sync**: dynamic rate control keeps about 25 ms of audio buffered. This avoids crackles from the sound card's clock drifting against the system clock.
 - **ROM loading**: iNES, NES 2.0 and archaic iNES headers. This includes 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
-- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM) and 7 (AxROM). Together these cover a large share of the NES library.
+- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM). Together these cover most of the NES library. MMC3 passes blargg's `mmc3_test_2` tests 1, 2, 3 and 5 (and 6 for boards marked as MMC3A in a NES 2.0 header).
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
 - **Input**: keyboard as controller 1. The bus emulates both controller ports.
 
 ## Limitations
 
-- **No MMC3 (mapper 4) yet.** The scanline hook and IRQ line it needs are in place (`Mapper::scanline` and `Mapper::irq_pending`). The emulator exits with a message for unsupported mappers.
+- **MMC3 IRQ timing is per scanline.** The counter is clocked at the end of each rendered line rather than at the exact PPU dot, so blargg's `4-scanline_timing` test fails, and games that set both pattern tables to the same half still get one clock per line. Raster effects land on the right line in practice. The emulator exits with a message for unsupported mappers.
 - **Scanline-accurate, not dot-accurate.** Each line is drawn from the PPU's state at the end of that line, so a change made partway across a line takes effect on the next one. No sprite-per-line limit (no flicker), and no sprite overflow flag.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **NTSC only.** PAL and Dendy timing in a NES 2.0 header is read but not emulated.

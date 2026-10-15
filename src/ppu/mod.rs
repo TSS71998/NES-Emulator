@@ -126,6 +126,13 @@ impl NesPPU {
             self.render_y_bump += 1;
         } else {
             self.addr.increment(self.ctrl.vram_addr_increment());
+            self.report_address();
+        }
+    }
+
+    fn report_address(&mut self) {
+        if !self.is_rendering() {
+            self.mapper.borrow_mut().ppu_address(self.addr.get());
         }
     }
 
@@ -307,6 +314,9 @@ impl PPU for NesPPU {
         }
         self.addr.update(value, first_write);
         self.write_latch = !self.write_latch;
+        if !first_write {
+            self.report_address();
+        }
     }
 
     fn write_to_ctrl(&mut self, value: u8) {

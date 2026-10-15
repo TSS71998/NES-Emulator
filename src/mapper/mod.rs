@@ -3,12 +3,14 @@ mod cnrom;
 mod mmc1;
 mod nrom;
 mod uxrom;
+mod mmc3;
 
 pub use axrom::Axrom;
 pub use cnrom::Cnrom;
 pub use mmc1::Mmc1;
 pub use nrom::Nrom;
 pub use uxrom::Uxrom;
+pub use mmc3::Mmc3;
 
 use crate::cartridge::{Mirroring, Rom};
 use std::cell::RefCell;
@@ -39,6 +41,12 @@ pub trait Mapper {
     /// counter is clocked, by the PPU's A12 address line going high.
     fn scanline(&mut self) {}
 
+    /// Called with the PPU's VRAM address whenever it changes while
+    /// rendering is off: after the second $2006 write and after each $2007
+    /// access. On real hardware the cartridge sees this address on the PPU
+    /// bus, so MMC3 can be clocked by toggling bit 12 (A12) through $2006.
+    fn ppu_address(&mut self, _addr: u16) {}
+
     /// Level of the cartridge's IRQ line. The CPU takes the interrupt when
     /// this is true and its I flag is clear, so a mapper keeps returning true
     /// until the game acknowledges the IRQ (for MMC3, a write to $E000).
@@ -63,10 +71,11 @@ pub fn from_rom(rom: Rom) -> Result<SharedMapper, String> {
         1 => Ok(Rc::new(RefCell::new(Mmc1::new(rom)))),
         2 => Ok(Rc::new(RefCell::new(Uxrom::new(rom)))),
         3 => Ok(Rc::new(RefCell::new(Cnrom::new(rom)))),
+        4 => Ok(Rc::new(RefCell::new(Mmc3::new(rom)))),
         7 => Ok(Rc::new(RefCell::new(Axrom::new(rom)))),
         n => {
             return Err(format!(
-                "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 7 AxROM)",
+                "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC2, 7 AxROM)",
                 n
             ))
         }
