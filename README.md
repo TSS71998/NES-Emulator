@@ -7,7 +7,8 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 ## Features
 
 - **CPU (6502)**: all official opcodes plus the common unofficial ones. Cycle counts match the `nestest` reference log for every instruction, including page-crossing and branch penalties.
-- **PPU**: background, 8×8 and 8×16 sprites, CHR-ROM and CHR-RAM, scrolling with mid-frame splits (e.g. the SMB status bar), sprite-0 hit, the shared `$2005`/`$2006` write latch, and the odd-frame dot skip.
+- **PPU**: background, 8×8 and 8×16 sprites, CHR-ROM and CHR-RAM, sprite priority, left-column clipping, sprite-0 hit, the shared `$2005`/`$2006` write latch, and the odd-frame dot skip. The picture is drawn one scanline at a time, so mid-frame changes to scroll, CHR banks, palettes or PPUMASK show up where they happen.
+- **Mapper IRQs**: cartridges get a call for every rendered scanline and can raise the CPU's IRQ line, which is what MMC3's scanline counter needs.
 - **APU**: both pulse channels, triangle, noise and DMC, the frame sequencer (envelopes, sweeps, length counters), the nonlinear mixer and the NES's output filters.
 - **Timing**: runs at the NTSC rate of 60.0988 frames per second. The CPU stalls for OAM DMA (513–514 cycles) and DMC sample fetches like the real hardware.
 - **Audio sync**: dynamic rate control keeps about 25 ms of audio buffered. This avoids crackles from the sound card's clock drifting against the system clock.
@@ -18,11 +19,11 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ## Limitations
 
-- **No MMC3 (mapper 4) yet.** It needs a scanline IRQ and per-scanline rendering, because games like *Super Mario Bros. 3* switch CHR banks mid-frame. The emulator exits with a message for unsupported mappers.
-- **Whole-frame rendering.** The frame is drawn from the PPU's state at the end of the frame. Mid-frame scroll splits work, but mid-frame CHR bank or palette changes don't show.
+- **No MMC3 (mapper 4) yet.** The scanline hook and IRQ line it needs are in place (`Mapper::scanline` and `Mapper::irq_pending`). The emulator exits with a message for unsupported mappers.
+- **Scanline-accurate, not dot-accurate.** Each line is drawn from the PPU's state at the end of that line, so a change made partway across a line takes effect on the next one. No sprite-per-line limit (no flicker), and no sprite overflow flag.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **NTSC only.** PAL and Dendy timing in a NES 2.0 header is read but not emulated.
-- **Not implemented:** keyboard mapping for controller 2, and the APU's frame and DMC interrupts. The CPU's IRQ line is wired up, but nothing raises it yet.
+- **Not implemented:** keyboard mapping for controller 2, and the APU's frame and DMC interrupts. (Mapper IRQs work.)
 - **Instruction-stepped CPU.** The PPU and APU catch up after each instruction rather than on every memory access, so register reads and writes can land a few cycles early.
 
 ## Building and running
@@ -73,7 +74,7 @@ The tests cover CPU instructions, PPU registers and VRAM mirroring, APU channels
 | `src/cpu.rs`, `src/opcodes.rs` | 6502 CPU and opcode table |
 | `src/bus.rs` | Memory map; steps the PPU and APU once per CPU cycle and handles DMA stalls |
 | `src/ppu/` | Picture processing unit and its registers |
-| `src/render/` | Turns PPU state into a 256×240 frame |
+| `src/render/` | Draws each scanline from PPU state into the 256×240 frame |
 | `src/apu.rs` | Audio processing unit: channels, frame sequencer, mixer and resampling |
 | `src/audio.rs` | SDL audio output with dynamic rate control |
 | `src/frame_limiter.rs` | Keeps the emulator at 60.0988 fps when vsync isn't used |

@@ -18,7 +18,6 @@ use cpu::CPU;
 use frame_limiter::FrameLimiter;
 use mapper::SharedMapper;
 use ppu::NesPPU;
-use render::frame::Frame;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
@@ -68,7 +67,7 @@ fn main() {
         .create_texture_target(PixelFormatEnum::RGB24, 256, 240)
         .unwrap();
 
-    let rom_arg = std::env::args().nth(1).unwrap_or_else(|| "smb.nes".to_string());
+    let rom_arg = std::env::args().nth(1).unwrap_or_else(|| "Alter_Ego.nes".to_string());
     let rom_path = find_rom(&rom_arg);
     let bytes: Vec<u8> = std::fs::read(&rom_path)
         .unwrap_or_else(|e| exit_with_error(&format!("can't read {}: {}", rom_path.display(), e)));
@@ -80,8 +79,6 @@ fn main() {
         cartridge.borrow_mut().load_battery_ram(&data);
     }
     let mut saver = BatterySaver::new(cartridge.clone(), save_path);
-
-    let mut frame = Frame::new();
 
     let mut key_map = HashMap::new();
     key_map.insert(Keycode::Down, joypad::JoypadButton::DOWN);
@@ -97,8 +94,8 @@ fn main() {
     let mut bus = Bus::new(cartridge, move |ppu: &NesPPU, joypads: &mut [joypad::Joypad; 2]| {
         let joypad = &mut joypads[0];
         saver.on_frame();
-        render::render(ppu, &mut frame);
-        texture.update(None, &frame.data, 256 * 3).unwrap();
+        
+        texture.update(None, &ppu.frame.data, 256 * 3).unwrap();
 
         let visible = Rect::new(0, OVERSCAN_LINES as i32, 256, VISIBLE_LINES);
         canvas.copy(&texture, visible, None).unwrap();

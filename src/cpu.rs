@@ -1339,4 +1339,56 @@ mod test {
 
         assert_eq!(cpu.mem_read_u16(0xFFFF), 0xCDAB);
     }
+
+    /// Enables rendering, then spins at $8006. The IRQ handler at $9000
+    /// counts interrupts in $10 and acknowledges with a write to $E000.
+    fn irq_test_cpu<'a>(
+        irq_every: usize,
+        disable_interrupts: bool,
+    ) -> (CPU<'a>, std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>) {
+        use crate::mapper::test_util::ScanlineCounter;
+        let mut prg = vec![0; 0x8000];
+        let main = [
+            0xA9, 0x08, // LDA #$08
+            0x8D, 0x01, 0x20, // STA $2001 (show background)
+            if disable_interrupts { 0x78 } else { 0x58 }, // SEI / CLI
+            0x4C, 0x06, 0x80, // JMP $8006
+        ];
+        prg[..main.len()].copy_from_slice(&main);
+        let handler = [
+            0xE6, 0x10, // INC $10
+            0x8D, 0x00, 0xE0, // STA $E000 (acknowledge)
+            0x40, // RTI
+        ];
+        prg[0x1000..0x1000 + handler.len()].copy_from_slice(&handler);
+        prg[0x7FFE] = 0x00; // IRQ vector -> $9000
+        prg[0x7FFF] = 0x90;
+
+        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(prg, Some(irq_every))));
+        let cpu = CPU::new(Bus::new(cart.clone(), |_ppu, _joypads| {}));
+        (cpu, cart)
+    }
+
+    #[test]
+    fn test_mapper_irq_is_taken_and_acknowledged() {
+        let (mut cpu, cart) = irq_test_cpu(20, false);
+        run_steps(&mut cpu, 3000);
+
+        let scanlines = cart.borrow().scanlines;
+        assert!(scanlines >= 60, "only {} scanlines ran", scanlines);
+        // one handler run per IRQ: the handler acknowledges, so IRQs don't repeat
+        assert_eq!(cpu.mem_read(0x10) as usize, scanlines / 20);
+        // RTI restored the main loop with interrupts enabled
+        assert!(!cpu.status.contains(CpuFlags::INTERRUPT_DISABLE));
+        assert!((0x8006..=0x8008).contains(&cpu.program_counter));
+    }
+
+    #[test]
+    fn test_mapper_irq_is_masked_by_i_flag() {
+        let (mut cpu, cart) = irq_test_cpu(20, true);
+        run_steps(&mut cpu, 3000);
+
+        assert!(cart.borrow().irq, "the cartridge should be holding IRQ low");
+        assert_eq!(cpu.mem_read(0x10), 0);
+    }
 }

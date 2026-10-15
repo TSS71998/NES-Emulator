@@ -33,6 +33,15 @@ pub trait Mapper {
 
     fn mirroring(&self) -> Mirroring;
 
+    /// Called once per scanline while rendering is enabled: after each of
+    /// the 240 visible lines and the pre-render line, at the point where the
+    /// PPU fetches sprite patterns (about dot 260). This is when MMC3's IRQ
+    /// counter is clocked, by the PPU's A12 address line going high.
+    fn scanline(&mut self) {}
+
+    /// Level of the cartridge's IRQ line. The CPU takes the interrupt when
+    /// this is true and its I flag is clear, so a mapper keeps returning true
+    /// until the game acknowledges the IRQ (for MMC3, a write to $E000).
     fn irq_pending(&self) -> bool {
         false
     }
@@ -143,6 +152,57 @@ pub(crate) mod test_util {
             prg_nvram_size: 0,
             chr_ram_size: 0,
             chr_nvram_size: 0,
+        }
+    }
+
+    pub struct ScanlineCounter {
+        pub prg_rom: Vec<u8>,
+        chr: Vec<u8>,
+        pub scanlines: usize,
+        pub irq_every: Option<usize>,
+        pub irq: bool
+    }
+
+    impl ScanlineCounter {
+        pub fn new(prg_rom:Vec<u8>, irq_every: Option<usize>) -> Self {
+            ScanlineCounter { prg_rom, chr: vec![0; 0x2000], scanlines: 0, irq_every, irq: false }
+        }
+    }
+
+    impl super::Mapper for ScanlineCounter {
+        fn cpu_read(&self, addr: u16) -> Option<u8> {
+            (addr >= 0x8000).then(|| self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()])
+        }
+
+        fn cpu_write(&mut self, addr: u16, _data: u8) {
+            if addr >= 0xE000 {
+                self.irq = false
+            }
+        }
+
+        fn ppu_read(&self, addr: u16) -> u8 {
+            self.chr[addr as usize & 0x1FFF]
+        }
+
+        fn ppu_write(&mut self, addr: u16, data: u8) {
+            self.chr[addr as usize & 0x1FFF] = data;
+        }
+
+        fn mirroring(&self) -> Mirroring {
+            Mirroring::Vertical
+        }
+
+        fn scanline(&mut self) {
+            self.scanlines += 1;
+            if let Some(n) = self.irq_every {
+                if self.scanlines % n == 0 {
+                    self.irq = true;
+                }
+            }
+        }
+
+        fn irq_pending(&self) -> bool {
+            self.irq
         }
     }
 }

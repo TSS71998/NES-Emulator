@@ -1,5 +1,7 @@
 use crate::cartridge::Mirroring;
 use crate::mapper::SharedMapper;
+use crate::render;
+use crate::render::frame::Frame;
 use registers::addr::AddrRegister;
 use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
@@ -33,6 +35,7 @@ pub struct NesPPU {
     // (scroll_x, scroll_y, nametable_addr) in effect for each visible scanline,
     // so mid-frame scroll splits (e.g. SMB status bar) render correctly
     pub scanline_scroll: [(u8, u8, u16); 240],
+    pub frame: Frame
 }
 
 pub trait PPU {
@@ -62,6 +65,7 @@ impl NesPPU {
             scanlines: 0,
             nmi_pending: false,
             scanline_scroll: [(0, 0, 0x2000); 240],
+            frame: Frame::new(),
             write_latch: false,
             odd_frame: false,
             render_y_bump: 0,
@@ -165,8 +169,15 @@ impl NesPPU {
                 self.status.set_sprite_zero_hit(true);
             }
 
-            if (self.scanlines as usize) < 240 {
-                self.scanline_scroll[self.scanlines as usize] = self.current_scroll();
+            let line = self.scanlines as usize;
+            if line < 240 {
+                let scroll = self.current_scroll();
+                self.scanline_scroll[line] = scroll;
+                self.render_scanline(line, scroll);
+            }
+
+            if rendering && (line < 240 || line == 261) {
+                self.mapper.borrow_mut().scanline();
             }
 
             self.cycles = self.cycles - line_len;
@@ -191,6 +202,12 @@ impl NesPPU {
             }
         }
         return false;
+    }
+
+    fn render_scanline(&mut self, line: usize, scroll: (u8, u8, u16)) {
+        let mut frame = std::mem::take(&mut self.frame);
+        render::render_scanline(self, line, scroll, &mut frame);
+        self.frame = frame;
     }
 
     /// Returns the logical nametable's offset into vram, the tile column/row and the
@@ -647,5 +664,51 @@ pub mod test {
         ppu.write_to_ppu_addr(0x3F);
         ppu.write_to_ppu_addr(0x10);
         assert_eq!(ppu.read_data(), 0x21);
+    }
+
+    fn counting_ppu() -> (NesPPU, std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>) {
+        use crate::mapper::test_util::ScanlineCounter;
+        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(vec![0; 0x8000], None)));
+        (NesPPU::new(cart.clone()), cart)
+    }
+
+    fn run_frame(ppu: &mut NesPPU) {
+        while !ppu.tick(3) {}
+    }
+
+    #[test]
+    fn test_mapper_clocked_once_per_rendered_line() {
+        let (mut ppu, cart) = counting_ppu();
+        ppu.write_to_mask(0b0000_1000); // show background
+        run_frame(&mut ppu);
+        // 240 visible lines + the pre-render line
+        assert_eq!(cart.borrow().scanlines, 241);
+    }
+
+    #[test]
+    fn test_mapper_not_clocked_when_rendering_off() {
+        let (mut ppu, cart) = counting_ppu();
+        run_frame(&mut ppu);
+        assert_eq!(cart.borrow().scanlines, 0);
+    }
+
+    #[test]
+    fn test_mid_frame_change_shows_on_later_lines() {
+        use crate::render::palette::SYSTEM_PALETTE;
+        // blank CHR, so every background pixel is the backdrop colour
+        let (mut ppu, _cart) = counting_ppu();
+        ppu.palette_table[0] = 0x0F;
+        while ppu.scanlines < 100 {
+            ppu.tick(3);
+        }
+        ppu.palette_table[0] = 0x16; // change the backdrop mid-frame
+        run_frame(&mut ppu);
+
+        let pixel = |y: usize| {
+            let i = y * 256 * 3;
+            (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+        };
+        assert_eq!(pixel(50), SYSTEM_PALETTE[0x0F]);
+        assert_eq!(pixel(150), SYSTEM_PALETTE[0x16]);
     }
 }
