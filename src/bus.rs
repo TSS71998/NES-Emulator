@@ -131,7 +131,7 @@ impl<'a> Bus<'a> {
         }
 
         self.ppu_clock_remainder += self.region.cpu_divider();
-        let dots = self.ppu_clock_remainder / self.region.cpu_divider();
+        let dots = self.ppu_clock_remainder / self.region.ppu_divider();
         self.ppu_clock_remainder %= self.region.ppu_divider();
         let new_frame = self.ppu.tick(dots as u8);
 
