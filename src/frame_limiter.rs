@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-pub const NES_FPS: f64 = 1_789_773.0 / 29_780.5;
-
 const SPIN_MARGIN: Duration = Duration::from_micros(2000);
 
 pub struct FrameLimiter {

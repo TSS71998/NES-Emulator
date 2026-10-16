@@ -98,7 +98,7 @@ mod interrupt {
     pub enum InterruptType {
         NMI,
         IRQ,
-        BRK
+        BRK,
     }
 
     #[derive(PartialEq, Eq)]
@@ -121,7 +121,7 @@ mod interrupt {
         itype: InterruptType::IRQ,
         vector_addr: 0xFFFE,
         b_flag_mask: 0b00100000,
-        cpu_cycles: 7
+        cpu_cycles: 7,
     };
     // BRK pushes the B flag, which is how a handler tells it apart from IRQ.
     pub(super) const BRK: Interrupt = Interrupt {
@@ -129,7 +129,7 @@ mod interrupt {
         vector_addr: 0xFFFE,
         b_flag_mask: 0b00110000,
         // the 7 cycles are already in the opcode table
-        cpu_cycles: 0
+        cpu_cycles: 0,
     };
 }
 
@@ -141,9 +141,8 @@ fn resolve_address(
     addr: u16,
     x: u8,
     y: u8,
-    mut read: impl FnMut(u16) -> u8
+    mut read: impl FnMut(u16) -> u8,
 ) -> (u16, bool) {
-
     fn pointer(read: &mut impl FnMut(u16) -> u8, lo: u16, hi: u16) -> u16 {
         let lo = read(lo) as u16;
         let hi = read(hi) as u16;
@@ -167,7 +166,10 @@ fn resolve_address(
         }
         AddressingMode::Indirect_X => {
             let ptr = read(addr).wrapping_add(x);
-            (pointer(&mut read, ptr as u16, ptr.wrapping_add(1) as u16), false)
+            (
+                pointer(&mut read, ptr as u16, ptr.wrapping_add(1) as u16),
+                false,
+            )
         }
         AddressingMode::Indirect_Y => {
             let base = read(addr);
@@ -179,7 +181,6 @@ fn resolve_address(
             panic!("mode {:?} is not supported", mode);
         }
     }
-
 }
 
 impl<'a> CPU<'a> {
@@ -203,7 +204,10 @@ impl<'a> CPU<'a> {
     }
 
     pub fn peek_absolute_address(&self, mode: &AddressingMode, addr: u16) -> u16 {
-        resolve_address(mode, addr, self.register_x, self.register_y, |a| self.bus.peek(a)).0
+        resolve_address(mode, addr, self.register_x, self.register_y, |a| {
+            self.bus.peek(a)
+        })
+        .0
     }
 
     fn get_operand_address(&mut self, mode: &AddressingMode) -> (u16, bool) {
@@ -678,7 +682,7 @@ impl<'a> CPU<'a> {
             self.execute_instruction();
         }
     }
-    
+
     pub fn step(&mut self) {
         self.service_interrupts();
         self.execute_instruction();
@@ -697,8 +701,8 @@ impl<'a> CPU<'a> {
         self.program_counter = self.program_counter.wrapping_add(1);
         let program_counter_state = self.program_counter;
 
-        let opcode = opcodes::lookup(code)
-            .unwrap_or_else(|| panic!("OpCode {:x} is not recognized", code));
+        let opcode =
+            opcodes::lookup(code).unwrap_or_else(|| panic!("OpCode {:x} is not recognized", code));
 
         match code {
             0xa9 | 0xa5 | 0xb5 | 0xad | 0xbd | 0xb9 | 0xa1 | 0xb1 => {
@@ -714,29 +718,29 @@ impl<'a> CPU<'a> {
                 // BRK skips a padding byte, so the return address is BRK + 2
                 self.program_counter = self.program_counter.wrapping_add(1);
                 self.interrupt(interrupt::BRK);
-            },
-            /* CLD */ 
+            }
+            /* CLD */
             0xd8 => self.status.remove(CpuFlags::DECIMAL_MODE),
 
-            /* CLI */ 
+            /* CLI */
             0x58 => self.status.remove(CpuFlags::INTERRUPT_DISABLE),
 
-            /* CLV */ 
+            /* CLV */
             0xb8 => self.status.remove(CpuFlags::OVERFLOW),
 
-            /* CLC */ 
+            /* CLC */
             0x18 => self.clear_carry_flag(),
 
-            /* SEC */ 
+            /* SEC */
             0x38 => self.set_carry_flag(),
 
-            /* SEI */ 
+            /* SEI */
             0x78 => self.status.insert(CpuFlags::INTERRUPT_DISABLE),
 
-            /* SED */ 
+            /* SED */
             0xf8 => self.status.insert(CpuFlags::DECIMAL_MODE),
 
-            /* PHA */ 
+            /* PHA */
             0x48 => self.stack_push(self.register_a),
 
             /* PLA */
@@ -779,7 +783,7 @@ impl<'a> CPU<'a> {
                 self.ora(&opcode.mode);
             }
 
-            /* LSR */ 
+            /* LSR */
             0x4a => self.lsr_accumulator(),
 
             /* LSR */
@@ -787,7 +791,7 @@ impl<'a> CPU<'a> {
                 self.lsr(&opcode.mode);
             }
 
-            /*ASL*/ 
+            /*ASL*/
             0x0a => self.asl_accumulator(),
 
             /* ASL */
@@ -795,7 +799,7 @@ impl<'a> CPU<'a> {
                 self.asl(&opcode.mode);
             }
 
-            /*ROL*/ 
+            /*ROL*/
             0x2a => self.rol_accumulator(),
 
             /* ROL */
@@ -803,7 +807,7 @@ impl<'a> CPU<'a> {
                 self.rol(&opcode.mode);
             }
 
-            /* ROR */ 
+            /* ROR */
             0x6a => self.ror_accumulator(),
 
             /* ROR */
@@ -1111,8 +1115,8 @@ impl<'a> CPU<'a> {
             //todo: test for everything below
 
             /* NOP read */
-            0x04 | 0x44 | 0x64 | 0x14 | 0x34 | 0x54 | 0x74 | 0xd4 | 0xf4 | 0x0c | 0x1c
-            | 0x3c | 0x5c | 0x7c | 0xdc | 0xfc => {
+            0x04 | 0x44 | 0x64 | 0x14 | 0x34 | 0x54 | 0x74 | 0xd4 | 0xf4 | 0x0c | 0x1c | 0x3c
+            | 0x5c | 0x7c | 0xdc | 0xfc => {
                 let (addr, page_cross) = self.get_operand_address(&opcode.mode);
                 let _data = self.mem_read(addr);
                 if page_cross {
@@ -1134,8 +1138,8 @@ impl<'a> CPU<'a> {
             }
 
             /* NOPs */
-            0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xb2 | 0xd2
-            | 0xf2 => { /* do nothing */ }
+            0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 | 0x92 | 0xb2 | 0xd2 | 0xf2 => { /* do nothing */
+            }
 
             0x1a | 0x3a | 0x5a | 0x7a | 0xda | 0xfa => { /* do nothing */ }
 
@@ -1190,8 +1194,9 @@ impl<'a> CPU<'a> {
             0x9b => {
                 let data = self.register_a & self.register_x;
                 self.stack_pointer = data;
-                let mem_address =
-                    self.mem_read_u16(self.program_counter).wrapping_add(self.register_y as u16);
+                let mem_address = self
+                    .mem_read_u16(self.program_counter)
+                    .wrapping_add(self.register_y as u16);
 
                 let data = ((mem_address >> 8) as u8).wrapping_add(1) & self.stack_pointer;
                 self.mem_write(mem_address, data)
@@ -1206,21 +1211,27 @@ impl<'a> CPU<'a> {
 
             /* AHX Absolute Y*/
             0x9f => {
-                let mem_address = self.mem_read_u16(self.program_counter).wrapping_add(self.register_y as u16);
+                let mem_address = self
+                    .mem_read_u16(self.program_counter)
+                    .wrapping_add(self.register_y as u16);
                 let data = self.register_a & self.register_x & (mem_address >> 8) as u8;
                 self.mem_write(mem_address, data)
             }
 
             /* SHX */
             0x9e => {
-                let mem_address = self.mem_read_u16(self.program_counter).wrapping_add(self.register_y as u16);
+                let mem_address = self
+                    .mem_read_u16(self.program_counter)
+                    .wrapping_add(self.register_y as u16);
                 let data = self.register_x & ((mem_address >> 8) as u8).wrapping_add(1);
                 self.mem_write(mem_address, data)
             }
 
             /* SHY */
             0x9c => {
-                let mem_address = self.mem_read_u16(self.program_counter).wrapping_add(self.register_x as u16);
+                let mem_address = self
+                    .mem_read_u16(self.program_counter)
+                    .wrapping_add(self.register_x as u16);
                 let data = self.register_y & ((mem_address >> 8) as u8).wrapping_add(1);
                 self.mem_write(mem_address, data)
             }
@@ -1240,7 +1251,10 @@ mod test {
     use crate::cartridge::test;
 
     fn cpu_with_program<'a>(program: Vec<u8>) -> CPU<'a> {
-        CPU::new(Bus::new(test::test_mapper_containing(program), |_ppu, _joypads| {}))
+        CPU::new(Bus::new(
+            test::test_mapper_containing(program),
+            |_ppu, _joypads| {},
+        ))
     }
 
     fn run_steps(cpu: &mut CPU, n: usize) {
@@ -1264,7 +1278,7 @@ mod test {
         let mut cpu = cpu_with_program(vec![0xaa]);
         cpu.register_a = 10;
         cpu.step();
-        
+
         assert_eq!(cpu.register_x, 10)
     }
 
@@ -1345,14 +1359,22 @@ mod test {
     fn irq_test_cpu<'a>(
         irq_every: usize,
         disable_interrupts: bool,
-    ) -> (CPU<'a>, std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>) {
+    ) -> (
+        CPU<'a>,
+        std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>,
+    ) {
         use crate::mapper::test_util::ScanlineCounter;
         let mut prg = vec![0; 0x8000];
         let main = [
-            0xA9, 0x08, // LDA #$08
-            0x8D, 0x01, 0x20, // STA $2001 (show background)
+            0xA9,
+            0x08, // LDA #$08
+            0x8D,
+            0x01,
+            0x20,                                         // STA $2001 (show background)
             if disable_interrupts { 0x78 } else { 0x58 }, // SEI / CLI
-            0x4C, 0x06, 0x80, // JMP $8006
+            0x4C,
+            0x06,
+            0x80, // JMP $8006
         ];
         prg[..main.len()].copy_from_slice(&main);
         let handler = [
@@ -1364,7 +1386,10 @@ mod test {
         prg[0x7FFE] = 0x00; // IRQ vector -> $9000
         prg[0x7FFF] = 0x90;
 
-        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(prg, Some(irq_every))));
+        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(
+            prg,
+            Some(irq_every),
+        )));
         let cpu = CPU::new(Bus::new(cart.clone(), |_ppu, _joypads| {}));
         (cpu, cart)
     }

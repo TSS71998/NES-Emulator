@@ -181,7 +181,7 @@ mod test {
         let mut cpu = CPU::new(bus);
         cpu.program_counter = 0x64;
         cpu.register_y = 0;
-        
+
         assert_eq!(
             "0064  11 33     ORA ($33),Y = 0400 @ 0400 = AA  A:00 X:00 Y:00 P:24 SP:FD",
             trace(&cpu)

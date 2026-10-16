@@ -1,9 +1,10 @@
 use crate::apu::APU;
 use crate::cpu::Mem;
 use crate::joypad::Joypad;
+use crate::mapper::SharedMapper;
+use crate::region::Region;
 use crate::ppu::NesPPU;
 use crate::ppu::PPU;
-use crate::mapper::SharedMapper;
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -47,6 +48,8 @@ pub struct Bus<'call> {
     open_bus: u8,
 
     cycles: usize,
+    region: Region,
+    ppu_clock_remainder: u32,
     gameloop_callback: Box<dyn FnMut(&NesPPU, &mut [Joypad; 2]) + 'call>,
     audio_callback: Option<Box<dyn FnMut(&[f32]) -> f64 + 'call>>,
     joypads: [Joypad; 2],
@@ -66,9 +69,11 @@ impl<'a> Bus<'a> {
             oam_dma_pending: false,
             open_bus: 0,
             cycles: 0,
+            region: Region::Ntsc,
+            ppu_clock_remainder: 0,
             gameloop_callback: Box::from(gameloop_callback),
             audio_callback: None,
-            joypads: [Joypad::new(), Joypad::new()]
+            joypads: [Joypad::new(), Joypad::new()],
         }
     }
 
@@ -78,6 +83,21 @@ impl<'a> Bus<'a> {
     {
         self.apu.set_sample_rate(sample_rate);
         self.audio_callback = Some(Box::new(callback));
+    }
+
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+        self.ppu.set_region(region);
+        self.apu.set_region(region);
+        self.ppu_clock_remainder = 0;
+    }
+
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    pub fn cpu_cycles(&self) -> usize {
+        self.cycles
     }
 
     fn cartridge_read(&self, addr: u16) -> u8 {
@@ -110,7 +130,11 @@ impl<'a> Bus<'a> {
             self.stall_cycles += 4;
         }
 
-        let new_frame = self.ppu.tick(3);
+        self.ppu_clock_remainder += self.region.cpu_divider();
+        let dots = self.ppu_clock_remainder / self.region.cpu_divider();
+        self.ppu_clock_remainder %= self.region.ppu_divider();
+        let new_frame = self.ppu.tick(dots as u8);
+
         if new_frame {
             if let Some(callback) = self.audio_callback.as_mut() {
                 let samples = self.apu.take_samples();
@@ -133,7 +157,7 @@ impl<'a> Bus<'a> {
         match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
             0x4020..=0xFFFF => self.cartridge_read(addr),
-            _ => self.open_bus
+            _ => self.open_bus,
         }
     }
 
@@ -152,7 +176,7 @@ impl Mem for Bus<'_> {
                 0x2002 => (self.ppu.read_status() & 0xE0) | (self.open_bus & 0x1F),
                 0x2004 => self.ppu.read_oam_data(),
                 0x2007 => self.ppu.read_data(),
-                _ => self.open_bus
+                _ => self.open_bus,
             },
 
             0x4015 => self.apu.read_status(),
@@ -161,7 +185,7 @@ impl Mem for Bus<'_> {
 
             0x4000..=0x401F => self.open_bus,
 
-            0x4020..=0xFFFF => self.cartridge_read(addr)
+            0x4020..=0xFFFF => self.cartridge_read(addr),
         };
         self.open_bus = value;
         value
@@ -175,14 +199,14 @@ impl Mem for Bus<'_> {
             0x2000..=0x3FFF => match addr & 0x2007 {
                 0x2000 => self.ppu.write_to_ctrl(data),
                 0x2001 => self.ppu.write_to_mask(data),
-                0x2002 => {/* PPUSTATUS is read-only */}
+                0x2002 => { /* PPUSTATUS is read-only */ }
                 0x2003 => self.ppu.write_to_oam_addr(data),
                 0x2004 => self.ppu.write_to_oam_data(data),
                 0x2005 => self.ppu.write_to_scroll(data),
                 0x2006 => self.ppu.write_to_ppu_addr(data),
                 0x2007 => self.ppu.write_to_data(data),
-                _ => unreachable!()
-            }
+                _ => unreachable!(),
+            },
 
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, data),
 
@@ -196,14 +220,14 @@ impl Mem for Bus<'_> {
                 self.ppu.write_oam_dma(&buffer);
 
                 self.oam_dma_pending = true;
-            },
+            }
 
             0x4016 => {
                 self.joypads[0].write(data);
                 self.joypads[1].write(data);
             }
 
-            0x4018..=0x401F => { /* CPU test mode registers */ },
+            0x4018..=0x401F => { /* CPU test mode registers */ }
 
             0x4020..=0xFFFF => self.mapper.borrow_mut().cpu_write(addr, data),
         }
@@ -272,5 +296,36 @@ mod test {
         bus.mem_write(0x4016, 0);
         assert_eq!(bus.mem_read(0x4016) & 1, 0);
         assert_eq!(bus.mem_read(0x4017) & 1, 1);
-     }
+    }
+
+    fn cycles_per_frame(region: Region, frames: usize) -> f64 {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let count = Rc::new(Cell::new(0usize));
+        let seen = count.clone();
+        let mut bus = Bus::new(test::test_mapper(), move |_ppu, _joypads| seen.set(seen.get() + 1));
+        bus.set_region(region);
+        bus.mem_write(0x2001, 0x08); // rendering on, so NTSC's odd-frame skip applies
+        while count.get() < 1 {
+            bus.tick(1);
+        }
+        let start = bus.cpu_cycles();
+        while count.get() < 1 + frames {
+            bus.tick(1);
+        }
+        (bus.cpu_cycles() - start) as f64 / frames as f64
+    }
+
+    #[test]
+    fn test_cpu_cycles_per_frame_by_region() {
+        for region in [Region::Ntsc, Region::Pal, Region::Dendy] {
+            let measured = cycles_per_frame(region, 20);
+            let expected = region.cpu_cycles_per_frame();
+            assert!(
+                (measured - expected).abs() <= 0.5,
+                "{:?}: {} cycles per frame, expected {}",
+                region, measured, expected
+            );
+        }
+    }
 }

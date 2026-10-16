@@ -1,4 +1,4 @@
-const CPU_CLOCK_NTSC: f64 = 1_789_773.0;
+use crate::region::{FrameSequencerTiming, Region};
 
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
@@ -15,14 +15,6 @@ const DUTY_TABLE: [[u8; 8]; 4] = [
 const TRIANGLE_TABLE: [u8; 32] = [
     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
     13, 14, 15,
-];
-
-const NOISE_PERIOD_TABLE: [u16; 16] = [
-    4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
-];
-
-const DMC_RATE_TABLE: [u16; 16] = [
-    428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
 ];
 
 #[derive(Default)]
@@ -272,7 +264,7 @@ impl Noise {
             length_halt: false,
             envelope: Envelope::default(),
             mode: false,
-            timer_period: NOISE_PERIOD_TABLE[0],
+            timer_period: Region::Ntsc.noise_periods()[0],
             timer: 0,
             shift: 1,
             length: 0,
@@ -284,9 +276,9 @@ impl Noise {
         self.envelope.write(value);
     }
 
-    fn write_period(&mut self, value: u8) {
+    fn write_period(&mut self, value: u8, periods: &[u16; 16]) {
         self.mode = value & 0x80 != 0;
-        self.timer_period = NOISE_PERIOD_TABLE[(value & 0x0f) as usize];
+        self.timer_period = periods[(value & 0x0F) as usize];
     }
 
     fn write_length(&mut self, value: u8) {
@@ -350,7 +342,7 @@ impl Dmc {
         Dmc {
             irq_enabled: false,
             loop_flag: false,
-            rate: DMC_RATE_TABLE[0],
+            rate: Region::Ntsc.dmc_rates()[0],
             timer: 0,
             output_level: 0,
             sample_addr: 0xc000,
@@ -364,10 +356,10 @@ impl Dmc {
         }
     }
 
-    fn write_control(&mut self, value: u8) {
+    fn write_control(&mut self, value: u8, rates: &[u16; 16]) {
         self.irq_enabled = value & 0x80 != 0;
         self.loop_flag = value & 0x40 != 0;
-        self.rate = DMC_RATE_TABLE[(value & 0x0f) as usize];
+        self.rate = rates[(value & 0x0F) as usize];
     }
 
     fn write_direct_load(&mut self, value: u8) {
@@ -513,6 +505,10 @@ pub struct APU {
     pulse_table: [f32; 31],
     tnd_table: [f32; 203],
 
+    region: Region,
+    cpu_clock: f64,
+    frame_timing: FrameSequencerTiming,
+
     sample_rate: f64,
     sample_phase: f64,
     sample_sum: f32,
@@ -548,6 +544,9 @@ impl APU {
             odd_cycle: false,
             pulse_table: pulse_table,
             tnd_table: tnd_table,
+            region: Region::Ntsc,
+            cpu_clock: Region::Ntsc.cpu_clock_hz(),
+            frame_timing: Region::Ntsc.frame_sequencer(),
             sample_rate: sample_rate as f64,
             sample_phase: 0.0,
             sample_sum: 0.0,
@@ -570,6 +569,12 @@ impl APU {
         self.high_pass_440 = HighPass::new(440.0, sample_rate as f32);
     }
 
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+        self.cpu_clock = region.cpu_clock_hz();
+        self.frame_timing = region.frame_sequencer();
+    }
+
     pub fn write_register(&mut self, addr: u16, value: u8) {
         match addr {
             0x4000 => self.pulse1.write_control(value),
@@ -586,9 +591,9 @@ impl APU {
             0x400b => self.triangle.write_timer_hi(value),
             0x400c => self.noise.write_control(value),
             0x400d => {} // unused
-            0x400e => self.noise.write_period(value),
+            0x400e => self.noise.write_period(value, self.region.noise_periods()),
             0x400f => self.noise.write_length(value),
-            0x4010 => self.dmc.write_control(value),
+            0x4010 => self.dmc.write_control(value, self.region.dmc_rates()),
             0x4011 => self.dmc.write_direct_load(value),
             0x4012 => self.dmc.write_sample_addr(value),
             0x4013 => self.dmc.write_sample_len(value),
@@ -663,24 +668,16 @@ impl APU {
 
     fn clock_frame_sequencer(&mut self) {
         self.frame_cycle += 1;
-        match (self.frame_cycle, self.five_step_mode) {
-            (7457, _) => self.quarter_frame(),
-            (14913, _) => {
-                self.quarter_frame();
-                self.half_frame();
-            }
-            (22371, _) => self.quarter_frame(),
-            (29829, false) => {
-                self.quarter_frame();
-                self.half_frame();
-            }
-            (29830, false) => self.frame_cycle = 0,
-            (37281, true) => {
-                self.quarter_frame();
-                self.half_frame();
-            }
-            (37282, true) => self.frame_cycle = 0,
-            _ => {}
+        let t = self.frame_timing;
+        let last_step = if self.five_step_mode { t.five_step_end } else { t.four_step_end };
+        let cycle = self.frame_cycle;
+        if cycle == t.steps[0] || cycle == t.steps[2] {
+            self.quarter_frame();
+        } else if cycle == t.steps[1] || cycle == last_step {
+            self.quarter_frame();
+            self.half_frame();
+        } else if cycle == last_step + 1 {
+            self.frame_cycle = 0;
         }
     }
 
@@ -707,8 +704,8 @@ impl APU {
         self.sample_sum += self.mix();
         self.sample_count += 1;
         self.sample_phase += self.sample_rate * self.rate_adjust;
-        if self.sample_phase >= CPU_CLOCK_NTSC {
-            self.sample_phase -= CPU_CLOCK_NTSC;
+        if self.sample_phase >= self.cpu_clock {
+            self.sample_phase -= self.cpu_clock;
             let raw = self.sample_sum / self.sample_count as f32;
             self.sample_sum = 0.0;
             self.sample_count = 0;
@@ -760,7 +757,7 @@ mod test {
     #[test]
     fn test_produces_samples_at_requested_rate() {
         let mut apu = APU::new(44100);
-        for _ in 0..(CPU_CLOCK_NTSC as usize) {
+        for _ in 0..(Region::Ntsc.cpu_clock_hz() as usize) {
             apu.tick();
         }
         let n = apu.take_samples().len() as i32;
@@ -798,10 +795,63 @@ mod test {
     fn test_rate_adjust_changes_sample_count() {
         let mut apu = APU::new(44100);
         apu.set_rate_adjust(1.005);
-        for _ in 0..(CPU_CLOCK_NTSC as usize) {
+        for _ in 0..(Region::Ntsc.cpu_clock_hz() as usize) {
             apu.tick();
         }
         let n = apu.take_samples().len() as i32;
         assert!((n - 44320).abs() <= 1, "got {} samples", n);
+    }
+
+    #[test]
+    fn test_pal_produces_samples_at_requested_rate() {
+        let mut apu = APU::new(44100);
+        apu.set_region(Region::Pal);
+        for _ in 0..(Region::Pal.cpu_clock_hz() as usize) {
+            apu.tick();
+        }
+        let n = apu.take_samples().len() as i32;
+        assert!((n - 44100).abs() <= 1, "got {} samples", n);
+    }
+
+    #[test]
+    fn test_region_rate_tables() {
+        let mut apu = APU::new(44100);
+        apu.set_region(Region::Pal);
+        apu.write_register(0x400e, 0x0f);
+        apu.write_register(0x4010, 0x0f);
+        assert_eq!(apu.noise.timer_period, 3778);
+        assert_eq!(apu.dmc.rate, 50);
+
+        apu.set_region(Region::Dendy); // NTSC-style APU
+        apu.write_register(0x400e, 0x0f);
+        assert_eq!(apu.noise.timer_period, 4068);
+    }
+
+    /// CPU cycles between the first two half-frame clocks (length counter ticks).
+    fn half_frame_interval(region: Region) -> u32 {
+        let mut apu = APU::new(44100);
+        apu.set_region(region);
+        apu.write_register(0x4015, 0x01);
+        apu.write_register(0x4000, 0x00); // length counter not halted
+        apu.write_register(0x4003, 0x18); // length 2
+        let mut ticks = vec![];
+        let mut cycle = 0u32;
+        while ticks.len() < 2 {
+            let before = apu.pulse1.length;
+            apu.tick();
+            cycle += 1;
+            if apu.pulse1.length != before {
+                ticks.push(cycle);
+            }
+        }
+        ticks[1] - ticks[0]
+    }
+
+    #[test]
+    fn test_frame_sequencer_timing_by_region() {
+        // from the mid-frame half clock to the end-of-sequence one
+        assert_eq!(half_frame_interval(Region::Ntsc), 29829 - 14913);
+        assert_eq!(half_frame_interval(Region::Pal), 33253 - 16627);
+        assert_eq!(half_frame_interval(Region::Dendy), 29829 - 14913);
     }
 }

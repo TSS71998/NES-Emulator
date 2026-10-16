@@ -87,8 +87,16 @@ pub fn render(ppu: &NesPPU, frame: &mut Frame) {
                     continue;
                 }
                 let rgb = palette::SYSTEM_PALETTE[sprite_palette[value as usize] as usize];
-                let px = if flip_horizontal { tile_x + 7 - x } else { tile_x + x };
-                let py = if flip_vertical { tile_y + height - 1 - y } else { tile_y + y };
+                let px = if flip_horizontal {
+                    tile_x + 7 - x
+                } else {
+                    tile_x + x
+                };
+                let py = if flip_vertical {
+                    tile_y + height - 1 - y
+                } else {
+                    tile_y + y
+                };
                 frame.set_pixel(px, py, rgb);
             }
         }
@@ -108,11 +116,12 @@ fn render_background_line(
     line: usize,
     scroll: (u8, u8, u16),
     frame: &mut Frame,
-    bg_values: &mut [u8; 256]
+    bg_values: &mut [u8; 256],
 ) {
     let backdrop = palette::SYSTEM_PALETTE[ppu.palette_table[0] as usize];
     for screen_x in 0..256 {
-        let hidden = !ppu.mask.show_background() || (screen_x < 8 && !ppu.mask.leftmost_8pxl_background());
+        let hidden =
+            !ppu.mask.show_background() || (screen_x < 8 && !ppu.mask.leftmost_8pxl_background());
         if hidden {
             frame.set_pixel(screen_x, line, backdrop);
             continue;
@@ -123,7 +132,11 @@ fn render_background_line(
         let palette = bg_palette(ppu, attribute_table, tile_column, tile_row);
         bg_values[screen_x] = value;
 
-        frame.set_pixel(screen_x, line, palette::SYSTEM_PALETTE[palette[value as usize] as usize]);
+        frame.set_pixel(
+            screen_x,
+            line,
+            palette::SYSTEM_PALETTE[palette[value as usize] as usize],
+        );
     }
 }
 
@@ -161,7 +174,11 @@ fn render_sprites_line(ppu: &NesPPU, line: usize, frame: &mut Frame, bg_values: 
             if value == 0 {
                 continue;
             }
-            let px = if flip_horizontal { tile_x + 7 - x } else { tile_x + x };
+            let px = if flip_horizontal {
+                tile_x + 7 - x
+            } else {
+                tile_x + x
+            };
             if px >= 256 || claimed[px] || (px < 8 && !ppu.mask.leftmost_8pxl_sprite()) {
                 continue;
             }

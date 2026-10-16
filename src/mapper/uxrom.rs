@@ -1,4 +1,4 @@
-use super::{bank_offset, Chr, Mapper};
+use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
 
 const PRG_BANK: usize = 0x4000;
@@ -11,7 +11,7 @@ pub struct Uxrom {
     prg_rom: Vec<u8>,
     chr: Chr,
     mirroring: Mirroring,
-    bank: usize
+    bank: usize,
 }
 
 impl Uxrom {
@@ -20,7 +20,7 @@ impl Uxrom {
             chr: Chr::new(&rom),
             mirroring: rom.screen_mirroring,
             prg_rom: rom.prg_rom,
-            bank: 0
+            bank: 0,
         }
     }
 }
@@ -32,7 +32,7 @@ impl Mapper for Uxrom {
         match addr {
             0x8000..=0xBFFF => Some(self.prg_rom[bank_offset(self.bank, PRG_BANK, len) + offset]),
             0xC000..=0xFFFF => Some(self.prg_rom[len - PRG_BANK + offset]),
-            _ => None
+            _ => None,
         }
     }
 

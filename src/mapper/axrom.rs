@@ -1,4 +1,4 @@
-use super::{bank_offset, Chr, Mapper};
+use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
 
 const PRG_BANK: usize = 0x8000;
@@ -11,7 +11,7 @@ pub struct Axrom {
     prg_rom: Vec<u8>,
     chr: Chr,
     bank: usize,
-    upper_screen: bool
+    upper_screen: bool,
 }
 
 impl Axrom {
@@ -20,7 +20,7 @@ impl Axrom {
             chr: Chr::new(&rom),
             prg_rom: rom.prg_rom,
             bank: 0,
-            upper_screen: false
+            upper_screen: false,
         }
     }
 }
@@ -32,7 +32,7 @@ impl Mapper for Axrom {
                 let base = bank_offset(self.bank, PRG_BANK, self.prg_rom.len());
                 Some(self.prg_rom[(base + (addr as usize - 0x8000)) % self.prg_rom.len()])
             }
-            _ => None
+            _ => None,
         }
     }
 

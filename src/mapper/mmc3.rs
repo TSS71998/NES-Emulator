@@ -1,4 +1,4 @@
-use super::{bank_offset, prg_ram_size, Chr, Mapper};
+use super::{Chr, Mapper, bank_offset, prg_ram_size};
 use crate::cartridge::{Mirroring, Rom};
 
 const PRG_BANK: usize = 0x2000;
@@ -24,7 +24,7 @@ const CHR_BANK: usize = 0x0400;
 /// [`Mapper::scanline`]. Outside rendering the PPU reports address changes
 /// from $2006/$2007 through [`Mapper::ppu_address`], so games and test ROMs
 /// that clock the counter by hand work too
- pub struct Mmc3 {
+pub struct Mmc3 {
     prg_rom: Vec<u8>,
     prg_ram: Vec<u8>,
     chr: Chr,
@@ -47,7 +47,7 @@ const CHR_BANK: usize = 0x0400;
     /// reloaded with 0. NES 2.0 submapper 4 marks these boards.
     old_irq_behavior: bool,
 
-    a12_high: bool
+    a12_high: bool,
 }
 
 impl Mmc3 {
@@ -61,7 +61,7 @@ impl Mmc3 {
             has_battery: rom.has_battery,
             four_screen,
             bank_select: 0,
-            registers: [0, 2,  4, 5, 6, 7, 0, 1],
+            registers: [0, 2, 4, 5, 6, 7, 0, 1],
             mirroring: rom.screen_mirroring,
             prg_ram_enabled: true,
             prg_ram_write_protected: false,
@@ -71,7 +71,7 @@ impl Mmc3 {
             irq_enabled: false,
             irq_pending: false,
             old_irq_behavior,
-            a12_high: false
+            a12_high: false,
         }
     }
 
@@ -90,7 +90,7 @@ impl Mmc3 {
             (1, _) => r7,
             (2, false) => second_last,
             (2, true) => r6,
-            _ => last
+            _ => last,
         };
         bank_offset(bank, PRG_BANK, len) + (addr as usize & (PRG_BANK - 1))
     }
@@ -145,7 +145,7 @@ impl Mapper for Mmc3 {
                 Some(self.prg_ram[(addr as usize - 0x6000) % self.prg_ram.len()])
             }
             0x8000..=0xFFFF => Some(self.prg_rom[self.prg_offset(addr)]),
-            _ => None
+            _ => None,
         }
     }
 
@@ -162,7 +162,11 @@ impl Mapper for Mmc3 {
             0x8000..=0x9FFF => self.registers[(self.bank_select & 0x07) as usize] = data,
             0xA000..=0xBFFF if even => {
                 if !self.four_screen {
-                    self.mirroring = if data & 1 == 0 { Mirroring::Vertical } else { Mirroring::Horizontal };
+                    self.mirroring = if data & 1 == 0 {
+                        Mirroring::Vertical
+                    } else {
+                        Mirroring::Horizontal
+                    };
                 }
             }
             0xA000..=0xBFFF => {

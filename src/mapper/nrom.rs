@@ -11,7 +11,7 @@ pub struct Nrom {
     prg_ram: Vec<u8>,
     chr: Vec<u8>,
     chr_is_ram: bool,
-    mirroring: Mirroring
+    mirroring: Mirroring,
 }
 
 impl Nrom {
@@ -22,14 +22,18 @@ impl Nrom {
     /// A cartridge with no CHR-ROM gets 8 KiB of CHR-RAM instead.
     pub fn from_parts(prg_rom: Vec<u8>, chr_rom: Vec<u8>, mirroring: Mirroring) -> Self {
         let chr_is_ram = chr_rom.is_empty();
-        let chr = if chr_is_ram { vec![0; CHR_RAM_SIZE] } else { chr_rom };
+        let chr = if chr_is_ram {
+            vec![0; CHR_RAM_SIZE]
+        } else {
+            chr_rom
+        };
 
         Nrom {
             prg_rom,
             prg_ram: vec![0; PRG_RAM_SIZE],
             chr,
             chr_is_ram,
-            mirroring
+            mirroring,
         }
     }
 }
@@ -39,7 +43,7 @@ impl Mapper for Nrom {
         match addr {
             0x6000..=0x7FFF => Some(self.prg_ram[(addr - 0x6000) as usize]),
             0x8000..=0xFFFF => Some(self.prg_rom[(addr - 0x8000) as usize % self.prg_rom.len()]),
-            _ => None
+            _ => None,
         }
     }
 
@@ -79,7 +83,8 @@ mod test {
 
     #[test]
     fn test_prg_ram() {
-        let mut nrom = Nrom::from_parts(vec![0; 0x8000], vec![1; CHR_RAM_SIZE], Mirroring::Vertical);
+        let mut nrom =
+            Nrom::from_parts(vec![0; 0x8000], vec![1; CHR_RAM_SIZE], Mirroring::Vertical);
         nrom.cpu_write(0x6005, 0x99);
         assert_eq!(nrom.cpu_read(0x6005), Some(0x99));
         assert_eq!(nrom.cpu_read(0x5000), None);
@@ -87,7 +92,8 @@ mod test {
 
     #[test]
     fn test_chr_rom_is_read_only() {
-        let mut nrom = Nrom::from_parts(vec![0; 0x8000], vec![1; CHR_RAM_SIZE], Mirroring::Vertical);
+        let mut nrom =
+            Nrom::from_parts(vec![0; 0x8000], vec![1; CHR_RAM_SIZE], Mirroring::Vertical);
         nrom.ppu_write(0x0010, 0x55);
         assert_eq!(nrom.ppu_read(0x0010), 1);
     }

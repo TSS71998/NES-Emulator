@@ -1,4 +1,4 @@
-use super::{bank_offset, Chr, Mapper};
+use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
 
 const CHR_BANK: usize = 0x2000;
@@ -10,7 +10,7 @@ pub struct Cnrom {
     prg_rom: Vec<u8>,
     chr: Chr,
     mirroring: Mirroring,
-    chr_bank: usize
+    chr_bank: usize,
 }
 
 impl Cnrom {
@@ -19,7 +19,7 @@ impl Cnrom {
             chr: Chr::new(&rom),
             mirroring: rom.screen_mirroring,
             prg_rom: rom.prg_rom,
-            chr_bank: 0
+            chr_bank: 0,
         }
     }
 
@@ -32,7 +32,7 @@ impl Mapper for Cnrom {
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x8000..=0xFFFF => Some(self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()]),
-            _ => None
+            _ => None,
         }
     }
 

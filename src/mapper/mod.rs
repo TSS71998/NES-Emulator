@@ -1,16 +1,16 @@
 mod axrom;
 mod cnrom;
 mod mmc1;
+mod mmc3;
 mod nrom;
 mod uxrom;
-mod mmc3;
 
 pub use axrom::Axrom;
 pub use cnrom::Cnrom;
 pub use mmc1::Mmc1;
+pub use mmc3::Mmc3;
 pub use nrom::Nrom;
 pub use uxrom::Uxrom;
-pub use mmc3::Mmc3;
 
 use crate::cartridge::{Mirroring, Rom};
 use std::cell::RefCell;
@@ -75,9 +75,9 @@ pub fn from_rom(rom: Rom) -> Result<SharedMapper, String> {
         7 => Ok(Rc::new(RefCell::new(Axrom::new(rom)))),
         n => {
             return Err(format!(
-                "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC2, 7 AxROM)",
+                "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3, 7 AxROM)",
                 n
-            ))
+            ));
         }
     }
 }
@@ -98,16 +98,22 @@ fn prg_ram_size(rom: &Rom) -> usize {
 /// Pattern-table memory: the cartridge's CHR-ROM, or CHR-RAM if it has none.
 struct Chr {
     data: Vec<u8>,
-    is_ram: bool
+    is_ram: bool,
 }
 
 impl Chr {
     fn new(rom: &Rom) -> Self {
         if rom.chr_rom.is_empty() {
             let size = (rom.chr_ram_size + rom.chr_nvram_size).max(0x2000);
-            Chr { data: vec![0; size], is_ram: true }
+            Chr {
+                data: vec![0; size],
+                is_ram: true,
+            }
         } else {
-            Chr { data: rom.chr_rom.clone(), is_ram: false }
+            Chr {
+                data: rom.chr_rom.clone(),
+                is_ram: false,
+            }
         }
     }
 
@@ -136,16 +142,29 @@ pub(crate) mod test_util {
     /// which bank is mapped. The last byte of each bank is tagged with
     /// `0x80 | bank` instead, so a read that lands in the right bank but at
     /// the wrong offset fails too.
-    pub fn banked_rom(mapper: u16, prg_banks: usize, chr_banks_8k: usize, has_battery: bool) -> Rom {
+    pub fn banked_rom(
+        mapper: u16,
+        prg_banks: usize,
+        chr_banks_8k: usize,
+        has_battery: bool,
+    ) -> Rom {
         let mut prg_rom = vec![0; prg_banks * 0x4000];
         for (i, b) in prg_rom.iter_mut().enumerate() {
-            let bank = (i / 0x4000) as u8;            
-            *b = if i % 0x4000 == 0x3FFF { 0x80 | bank } else { bank };
+            let bank = (i / 0x4000) as u8;
+            *b = if i % 0x4000 == 0x3FFF {
+                0x80 | bank
+            } else {
+                bank
+            };
         }
         let mut chr_rom = vec![0; chr_banks_8k * 0x2000];
         for (i, b) in chr_rom.iter_mut().enumerate() {
-            let bank = (i / 0x400) as u8;            
-            *b = if i % 0x400 == 0x3FF { 0x80 | bank } else { bank };
+            let bank = (i / 0x400) as u8;
+            *b = if i % 0x400 == 0x3FF {
+                0x80 | bank
+            } else {
+                bank
+            };
         }
         Rom {
             prg_rom,
@@ -169,12 +188,18 @@ pub(crate) mod test_util {
         chr: Vec<u8>,
         pub scanlines: usize,
         pub irq_every: Option<usize>,
-        pub irq: bool
+        pub irq: bool,
     }
 
     impl ScanlineCounter {
-        pub fn new(prg_rom:Vec<u8>, irq_every: Option<usize>) -> Self {
-            ScanlineCounter { prg_rom, chr: vec![0; 0x2000], scanlines: 0, irq_every, irq: false }
+        pub fn new(prg_rom: Vec<u8>, irq_every: Option<usize>) -> Self {
+            ScanlineCounter {
+                prg_rom,
+                chr: vec![0; 0x2000],
+                scanlines: 0,
+                irq_every,
+                irq: false,
+            }
         }
     }
 

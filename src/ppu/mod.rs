@@ -1,5 +1,6 @@
 use crate::cartridge::Mirroring;
 use crate::mapper::SharedMapper;
+use crate::region::Region;
 use crate::render;
 use crate::render::frame::Frame;
 use registers::addr::AddrRegister;
@@ -26,6 +27,7 @@ pub struct NesPPU {
 
     write_latch: bool,
     odd_frame: bool,
+    region: Region,
     render_y_bump: u16,
 
     internal_data_buf: u8,
@@ -35,7 +37,7 @@ pub struct NesPPU {
     // (scroll_x, scroll_y, nametable_addr) in effect for each visible scanline,
     // so mid-frame scroll splits (e.g. SMB status bar) render correctly
     pub scanline_scroll: [(u8, u8, u16); 240],
-    pub frame: Frame
+    pub frame: Frame,
 }
 
 pub trait PPU {
@@ -68,6 +70,7 @@ impl NesPPU {
             frame: Frame::new(),
             write_latch: false,
             odd_frame: false,
+            region: Region::Ntsc,
             render_y_bump: 0,
 
             addr: AddrRegister::new(),
@@ -85,14 +88,14 @@ impl NesPPU {
         use std::rc::Rc;
         let cart = Nrom::from_parts(vec![0; 0x4000], vec![0; 0x2000], mirroring);
         NesPPU::new(Rc::new(RefCell::new(cart)))
-    }    
+    }
 
     #[cfg(test)]
     pub fn new_empty_rom() -> Self {
         NesPPU::with_mirroring(Mirroring::Horizontal)
     }
 
-    pub fn chr_read(&self, addr:u16) -> u8 {
+    pub fn chr_read(&self, addr: u16) -> u8 {
         self.mapper.borrow().ppu_read(addr)
     }
 
@@ -116,9 +119,17 @@ impl NesPPU {
         }
     }
 
+    pub fn set_region(&mut self, region: Region) {
+        self.region = region;
+    }
+
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
     fn is_rendering(&self) -> bool {
         (self.mask.show_background() || self.mask.show_sprites())
-            && (self.scanlines < 240 || self.scanlines == 261)
+            && (self.scanlines < 240 || self.scanlines == self.region.prerender_scanline())
     }
 
     fn increment_vram_addr(&mut self) {
@@ -165,11 +176,9 @@ impl NesPPU {
     pub fn tick(&mut self, cycles: u8) -> bool {
         self.cycles += cycles as usize;
         let rendering = self.mask.show_background() || self.mask.show_sprites();
-        let line_len = if self.scanlines == 261 && self.odd_frame && rendering {
-            340
-        } else {
-            341
-        };
+        let prerender = self.region.prerender_scanline();
+        let skip_dot = self.region.skips_odd_frame_dot() && self.odd_frame && rendering;
+        let line_len = if self.scanlines == prerender && skip_dot { 340 } else { 341 };
 
         if self.cycles >= line_len {
             if self.is_sprite_0_hit() {
@@ -183,14 +192,14 @@ impl NesPPU {
                 self.render_scanline(line, scroll);
             }
 
-            if rendering && (line < 240 || line == 261) {
+            if rendering && (line < 240 || line == prerender as usize) {
                 self.mapper.borrow_mut().scanline();
             }
 
             self.cycles = self.cycles - line_len;
             self.scanlines += 1;
 
-            if self.scanlines == 241 {
+            if self.scanlines == self.region.vblank_scanline() {
                 self.status.set_vblank_status(true);
                 self.status.set_sprite_zero_hit(false);
                 if self.ctrl.generate_vblank_nmi() {
@@ -198,7 +207,7 @@ impl NesPPU {
                 }
             }
 
-            if self.scanlines >= 262 {
+            if self.scanlines >= self.region.scanlines_per_frame() {
                 self.scanlines = 0;
                 self.odd_frame = !self.odd_frame;
                 self.nmi_pending = false;
@@ -299,7 +308,11 @@ impl NesPPU {
 
 fn palette_index(addr: u16) -> usize {
     let index = (addr & 0x1F) as usize;
-    if index & 0x13 == 0x10 { index & 0x0F } else { index } 
+    if index & 0x13 == 0x10 {
+        index & 0x0F
+    } else {
+        index
+    }
 }
 
 impl PPU for NesPPU {
@@ -356,9 +369,7 @@ impl PPU for NesPPU {
             }
             // palette RAM is 6 bits wide, so only colours $00-$3F can be stored.
             // palette_index handles the $3F10/$3F14/$3F18/$3F1C mirrors.
-            0x3f00..=0x3fff => {
-                self.palette_table[palette_index(addr)] = value & 0x3F
-            }
+            0x3f00..=0x3fff => self.palette_table[palette_index(addr)] = value & 0x3F,
             _ => panic!("unexpected access to mirrored space {}", addr),
         }
         self.increment_vram_addr();
@@ -603,7 +614,7 @@ pub mod test {
         assert_eq!(ppu.read_oam_data(), 0x66);
     }
 
-     #[test]
+    #[test]
     fn test_four_screen_uses_4k_vram() {
         let mut ppu = NesPPU::with_mirroring(Mirroring::FourScreen);
         ppu.write_to_ppu_addr(0x2C);
@@ -676,9 +687,15 @@ pub mod test {
         assert_eq!(ppu.read_data(), 0x21);
     }
 
-    fn counting_ppu() -> (NesPPU, std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>) {
+    fn counting_ppu() -> (
+        NesPPU,
+        std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>,
+    ) {
         use crate::mapper::test_util::ScanlineCounter;
-        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(vec![0; 0x8000], None)));
+        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(
+            vec![0; 0x8000],
+            None,
+        )));
         (NesPPU::new(cart.clone()), cart)
     }
 
@@ -716,9 +733,80 @@ pub mod test {
 
         let pixel = |y: usize| {
             let i = y * 256 * 3;
-            (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+            (
+                ppu.frame.data[i],
+                ppu.frame.data[i + 1],
+                ppu.frame.data[i + 2],
+            )
         };
         assert_eq!(pixel(50), SYSTEM_PALETTE[0x0F]);
         assert_eq!(pixel(150), SYSTEM_PALETTE[0x16]);
+    }
+
+    /// PPU dots from the start of a frame to the end of it, and to vblank.
+    fn measure_frame(region: Region, rendering: bool) -> (usize, usize) {
+        let (mut ppu, _cart) = counting_ppu();
+        ppu.set_region(region);
+        if rendering {
+            ppu.write_to_mask(0b0000_1000);
+        }
+        // start exactly on a frame boundary, with no leftover dots
+        while !ppu.tick(1) {}
+        let (mut dots, mut vblank_at) = (0, 0);
+        loop {
+            dots += 1;
+            let done = ppu.tick(1);
+            if vblank_at == 0 && ppu.status.is_in_vblank() {
+                vblank_at = dots;
+            }
+            if done {
+                return (dots, vblank_at);
+            }
+        }
+    }
+
+    #[test]
+    fn test_frame_lengths_by_region() {
+        assert_eq!(measure_frame(Region::Ntsc, false).0, 341 * 262);
+        assert_eq!(measure_frame(Region::Pal, false).0, 341 * 312);
+        assert_eq!(measure_frame(Region::Dendy, false).0, 341 * 312);
+        // no odd-frame skip outside NTSC, even with rendering on
+        assert_eq!(measure_frame(Region::Pal, true).0, 341 * 312);
+    }
+
+    #[test]
+    fn test_ntsc_odd_frames_skip_a_dot() {
+        let (mut ppu, _cart) = counting_ppu();
+        ppu.write_to_mask(0b0000_1000);
+        let mut lengths = vec![];
+        for _ in 0..4 {
+            let mut dots = 0;
+            loop {
+                dots += 1;
+                if ppu.tick(1) {
+                    break;
+                }
+            }
+            lengths.push(dots);
+        }
+        lengths.sort();
+        assert_eq!(lengths, vec![341 * 262 - 1, 341 * 262 - 1, 341 * 262, 341 * 262]);
+    }
+
+    #[test]
+    fn test_vblank_start_by_region() {
+        // vblank starts at the end of line 240 (NTSC/PAL) or 290 (Dendy)
+        assert_eq!(measure_frame(Region::Ntsc, false).1, 341 * 241);
+        assert_eq!(measure_frame(Region::Pal, false).1, 341 * 241);
+        assert_eq!(measure_frame(Region::Dendy, false).1, 341 * 291);
+    }
+
+    #[test]
+    fn test_mapper_clocked_on_pal_prerender_line() {
+        let (mut ppu, cart) = counting_ppu();
+        ppu.set_region(Region::Pal);
+        ppu.write_to_mask(0b0000_1000);
+        run_frame(&mut ppu);
+        assert_eq!(cart.borrow().scanlines, 241);
     }
 }

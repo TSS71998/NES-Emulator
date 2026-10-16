@@ -1,7 +1,7 @@
-use super::{bank_offset, prg_ram_size, Chr, Mapper};
+use super::{Chr, Mapper, bank_offset, prg_ram_size};
 use crate::cartridge::{Mirroring, Rom};
 
-/// Mapper 1: Nintendo MMC1 (SxROM boards). 
+/// Mapper 1: Nintendo MMC1 (SxROM boards).
 ///
 /// The CPU loads its registers one bit at a time: five writes to $8000-$FFFF
 /// shift bit 0 into a shift register, and the fifth write's address picks
@@ -27,7 +27,7 @@ pub struct Mmc1 {
     control: u8,
     chr_bank0: u8,
     chr_bank1: u8,
-    prg_bank: u8
+    prg_bank: u8,
 }
 
 const PRG_BANK: usize = 0x4000;
@@ -48,7 +48,7 @@ impl Mmc1 {
             control: 0x0C,
             chr_bank0: 0,
             chr_bank1: 0,
-            prg_bank: 0
+            prg_bank: 0,
         }
     }
 
@@ -72,9 +72,21 @@ impl Mmc1 {
             // 32 KiB mode: the low bit of the bank number is ignored
             0 | 1 => (bank & !1) + ((addr as usize - 0x8000) / PRG_BANK),
             // first bank fixed at $8000, switchable bank at $C000
-            2 => if addr < 0xC000 { 0 } else { bank },
+            2 => {
+                if addr < 0xC000 {
+                    0
+                } else {
+                    bank
+                }
+            }
             // switchable bank at $8000, last bank fixed at $C000
-            _ => if addr < 0xC000 { bank } else { window_banks - 1}
+            _ => {
+                if addr < 0xC000 {
+                    bank
+                } else {
+                    window_banks - 1
+                }
+            }
         };
 
         (outer + bank_offset(selected, PRG_BANK, len.min(PRG_OUTER_BANK)) + offset_in_bank) % len
@@ -86,7 +98,11 @@ impl Mmc1 {
             let bank = (self.chr_bank0 & 0x1E) as usize;
             bank_offset(bank, CHR_BANK, self.chr.len()) + addr
         } else {
-            let bank = if addr < CHR_BANK { self.chr_bank0 } else { self.chr_bank1 } as usize;
+            let bank = if addr < CHR_BANK {
+                self.chr_bank0
+            } else {
+                self.chr_bank1
+            } as usize;
             bank_offset(bank, CHR_BANK, self.chr.len()) + (addr & (CHR_BANK - 1))
         }
     }
@@ -96,7 +112,7 @@ impl Mmc1 {
             0x8000..=0x9FFF => self.control = value,
             0xA000..=0xBFFF => self.chr_bank0 = value,
             0xC000..=0xDFFF => self.chr_bank1 = value,
-            _ => self.prg_bank = value
+            _ => self.prg_bank = value,
         }
     }
 }
@@ -108,8 +124,8 @@ impl Mapper for Mmc1 {
                 Some(self.prg_ram[(addr as usize - 0x6000) % self.prg_ram.len()])
             }
             0x8000..=0xFFFF => Some(self.prg_rom[self.prg_offset(addr)]),
-            _ => None
-        }    
+            _ => None,
+        }
     }
 
     fn cpu_write(&mut self, addr: u16, data: u8) {
@@ -137,7 +153,7 @@ impl Mapper for Mmc1 {
                 }
             }
             _ => {}
-        }  
+        }
     }
 
     fn ppu_read(&self, addr: u16) -> u8 {
@@ -154,7 +170,7 @@ impl Mapper for Mmc1 {
             0 => Mirroring::SingleScreenLower,
             1 => Mirroring::SingleScreenUpper,
             2 => Mirroring::Vertical,
-            _ => Mirroring::Horizontal
+            _ => Mirroring::Horizontal,
         }
     }
 
@@ -166,7 +182,6 @@ impl Mapper for Mmc1 {
         let n = data.len().min(self.prg_ram.len());
         self.prg_ram[..n].copy_from_slice(&data[..n]);
     }
-
 }
 
 #[cfg(test)]
