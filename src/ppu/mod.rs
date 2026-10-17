@@ -68,6 +68,13 @@ pub struct NesPPU {
     /// detects its rising edge (see Bus).
     nmi_line: bool,
 
+    /// The PPU's I/O data latch, the "decay register". Writing any PPU
+    /// register fills it; reading a write-only register, or the undefined
+    /// bits of $2002 and of palette reads, returns it. Each bit fades to 0
+    /// about 600 ms after it was last refreshed (see `cpu_read`).
+    io_latch: u8,
+    io_latch_refreshed: [u64; 8],
+
     bg: Background,
     sprites: Sprites,
 
@@ -119,6 +126,8 @@ impl NesPPU {
             ppu_cycle: 0,
             suppress_vblank: false,
             nmi_line: false,
+            io_latch: 0,
+            io_latch_refreshed: [0; 8],
             rendering: false,
             bg: Background::default(),
             sprites: Sprites::default(),
@@ -296,6 +305,80 @@ impl NesPPU {
     pub fn is_odd_frame(&self) -> bool {
         self.odd_frame
     }
+
+    /// A CPU read of PPU register `reg` ($2000 + reg). Bits the register
+    /// doesn't drive come from the I/O latch; the bits it does drive refresh it.
+    pub fn cpu_read(&mut self, reg: u16) -> u8 {
+        match reg & 7 {
+            2 => {
+                let value = (self.read_status() & 0xE0) | (self.io_latch() & 0x1F);
+                self.refresh_io_latch(value, 0xE0);
+                value
+            }
+            4 => {
+                let value = self.read_oam_data();
+                self.refresh_io_latch(value, 0xFF);
+                value
+            }
+            7 => {
+                let palette = self.vram_addr() >= 0x3F00;
+                let value = self.read_data();
+                if palette {
+                    let value = (value & 0x3F) | (self.io_latch() & 0xC0);
+                    self.refresh_io_latch(value, 0x3F);
+                    value
+                } else {
+                    self.refresh_io_latch(value, 0xFF);
+                    value
+                }
+            }
+            _ => self.io_latch()
+        }
+    }
+
+    pub fn cpu_write(&mut self, reg: u16, value: u8) {
+        self.refresh_io_latch(value, 0xFF);
+        match reg & 7 {
+            0 => self.write_to_ctrl(value),
+            1 => self.write_to_mask(value),
+            2 => {}
+            3 => self.write_to_oam_addr(value),
+            4 => self.write_to_oam_data(value),
+            5 => self.write_to_scroll(value),
+            6 => self.write_to_ppu_addr(value),
+            _ => self.write_to_data(value),
+        }
+    }
+
+    /// The I/O latch, with bits not refreshed for ~600 ms decayed to 0.
+    fn io_latch(&mut self) -> u8 {
+        for bit in 0..8 {
+            if self.ppu_cycle - self.io_latch_refreshed[bit] > IO_LATCH_DECAY_DOTS {
+                self.io_latch &= !(1 << bit);
+            }
+        }
+        self.io_latch
+    }
+
+    /// Sets the latch bits in `mask` to `value` and restarts their decay.
+    fn refresh_io_latch(&mut self, value: u8, mask: u8) {
+        self.io_latch = (self.io_latch & !mask) | (value & mask);
+        for bit in 0..8 {
+            if mask & (1 << bit) != 0 {
+                self.io_latch_refreshed[bit] = self.ppu_cycle;
+            }
+        }
+    }
+}
+
+/// About 600 ms of PPU dots (NTSC 5.37 MHz; PAL's 5.32 MHz is close enough
+/// given how much real consoles vary).
+const IO_LATCH_DECAY_DOTS: u64 = 3_200_000;
+
+/// OAM byte 2 of each sprite (the attributes) has no bits 2-4: they always
+/// read back as 0.
+fn oam_byte(index: u8, value: u8) -> u8 {
+    if index & 3 == 2 { value & 0xE3 } else { value }
 }
 
 /// Maps a nametable address ($2000-$3EFF) to an index into the PPU's 4 KiB
@@ -355,7 +438,7 @@ impl PPU for NesPPU {
     }
 
     fn write_to_oam_data(&mut self, value: u8) {
-        self.oam_data[self.oam_addr as usize] = value;
+        self.oam_data[self.oam_addr as usize] = oam_byte(self.oam_addr, value);
         self.oam_addr = self.oam_addr.wrapping_add(1);
     }
 
@@ -391,7 +474,7 @@ impl PPU for NesPPU {
 
     fn write_oam_dma(&mut self, data: &[u8; 256]) {
         for x in data.iter() {
-            self.oam_data[self.oam_addr as usize] = *x;
+            self.oam_data[self.oam_addr as usize] = oam_byte(self.oam_addr, *x);
             self.oam_addr = self.oam_addr.wrapping_add(1);
         }
     }

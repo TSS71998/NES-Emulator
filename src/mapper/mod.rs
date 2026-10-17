@@ -25,6 +25,10 @@ pub trait Mapper {
     /// most mappers.
     fn cpu_write(&mut self, addr: u16, data: u8);
 
+    fn cpu_write_on_cycle(&mut self, addr: u16, data: u8, _cpu_cycle: usize) {
+        self.cpu_write(addr, data);
+    }
+
     /// PPU pattern-table read, $0000-$1FFF. Takes `&self` because the
     /// renderer only has shared access to the PPU; mappers that latch on PPU
     /// reads (MMC2/MMC4) can use a `Cell` for that state.
@@ -194,6 +198,7 @@ pub(crate) mod test_util {
         a12_low_since: u64,
         /// (ppu_cycle / 341, ppu_cycle % 341) of each A12 rise
         pub rises_at: Vec<(u64, u64)>,
+        pub writes: Vec<(u16, u8)>
     }
 
     impl ScanlineCounter {
@@ -207,6 +212,7 @@ pub(crate) mod test_util {
                 a12_high: false,
                 a12_low_since: 0,
                 rises_at: vec![],
+                writes: vec![]
             }
         }
     }
@@ -216,7 +222,8 @@ pub(crate) mod test_util {
             (addr >= 0x8000).then(|| self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()])
         }
 
-        fn cpu_write(&mut self, addr: u16, _data: u8) {
+        fn cpu_write(&mut self, addr: u16, data: u8) {
+            self.writes.push((addr, data));
             if addr >= 0xE000 {
                 self.irq = false
             }

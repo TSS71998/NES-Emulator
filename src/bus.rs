@@ -297,12 +297,7 @@ impl Mem for Bus<'_> {
         }
         let value = match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
-            0x2000..=0x3FFF => match addr & 0x2007 {
-                0x2002 => (self.ppu.read_status() & 0xE0) | (self.open_bus & 0x1F),
-                0x2004 => self.ppu.read_oam_data(),
-                0x2007 => self.ppu.read_data(),
-                _ => self.open_bus,
-            },
+            0x2000..=0x3FFF => self.ppu.cpu_read(addr & 7),
             0x4016 => (self.open_bus & 0xE0) | self.joypads[0].read(),
             0x4017 => (self.open_bus & 0xE0) | self.joypads[1].read(),
 
@@ -319,17 +314,7 @@ impl Mem for Bus<'_> {
         match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize] = data,
 
-            0x2000..=0x3FFF => match addr & 0x2007 {
-                0x2000 => self.ppu.write_to_ctrl(data),
-                0x2001 => self.ppu.write_to_mask(data),
-                0x2002 => { /* PPUSTATUS is read-only */ }
-                0x2003 => self.ppu.write_to_oam_addr(data),
-                0x2004 => self.ppu.write_to_oam_data(data),
-                0x2005 => self.ppu.write_to_scroll(data),
-                0x2006 => self.ppu.write_to_ppu_addr(data),
-                0x2007 => self.ppu.write_to_data(data),
-                _ => unreachable!(),
-            },
+            0x2000..=0x3FFF => self.ppu.cpu_write(addr & 7, data),
 
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, data),
 
@@ -353,7 +338,7 @@ impl Mem for Bus<'_> {
             0x4018..=0x401F => { /* CPU test mode registers */ }
 
             0x4020..=0xFFFF => {
-                self.mapper.borrow_mut().cpu_write(addr, data);
+                self.mapper.borrow_mut().cpu_write_on_cycle(addr, data, self.cycles);
                 self.ppu.refresh_mirroring();
             }
         }
@@ -382,7 +367,6 @@ mod test {
         let mut bus = test_bus();
         bus.mem_write(0x01, 0xA5);
         assert_eq!(bus.mem_read(0x01), 0xA5);
-        assert_eq!(bus.mem_read(0x2000), 0xA5);
         assert_eq!(bus.mem_read(0x4000), 0xA5);
         assert_eq!(bus.mem_read(0x5000), 0xA5); // nothing mapped on NROM
     }
@@ -453,5 +437,15 @@ mod test {
                 region, measured, expected
             );
         }
+    }
+
+    #[test]
+    fn test_ppu_registers_read_the_ppu_latch_not_cpu_open_bus() {
+        let mut bus = test_bus();
+        bus.mem_write(0x2003, 0xB2); // any PPU write fills the PPU's latch
+        bus.mem_write(0x01, 0x00);
+        assert_eq!(bus.mem_read(0x01), 0x00);
+        assert_eq!(bus.mem_read(0x2001), 0xB2); // write-only: the latch
+        assert_eq!(bus.mem_read(0x2002) & 0x1F, 0x12); // low 5 bits of $2002 too
     }
 }

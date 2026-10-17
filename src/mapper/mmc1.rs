@@ -28,6 +28,8 @@ pub struct Mmc1 {
     chr_bank0: u8,
     chr_bank1: u8,
     prg_bank: u8,
+
+    last_write_cycle: Option<usize>
 }
 
 const PRG_BANK: usize = 0x4000;
@@ -49,6 +51,8 @@ impl Mmc1 {
             chr_bank0: 0,
             chr_bank1: 0,
             prg_bank: 0,
+
+            last_write_cycle: None
         }
     }
 
@@ -154,6 +158,21 @@ impl Mapper for Mmc1 {
             }
             _ => {}
         }
+    }
+
+    /// The serial port ignores a write on the cycle right after another.
+    /// Read-modify-write instructions write twice in a row (the old value,
+    /// then the new one), so only the first counts: `INC $8000` on a ROM
+    /// byte with bit 7 set is a common way to reset the shift register.
+    fn cpu_write_on_cycle(&mut self, addr: u16, data: u8, cpu_cycle: usize) {
+        if addr >= 0x8000 {
+            let consecutive = self.last_write_cycle == Some(cpu_cycle.wrapping_sub(1));
+            self.last_write_cycle = Some(cpu_cycle);
+            if consecutive {
+                return;
+            }
+        }
+        self.cpu_write(addr, data);
     }
 
     fn ppu_read(&self, addr: u16) -> u8 {
@@ -303,5 +322,15 @@ mod test {
     fn test_no_battery_means_no_save() {
         let mmc1 = Mmc1::new(banked_rom(1, 2, 1, false));
         assert!(mmc1.battery_ram().is_none());
+    }
+
+    #[test]
+    fn test_write_on_the_next_cycle_is_ignored() {
+        let mut mmc1 = Mmc1::new(banked_rom(1, 16, 0, false));
+        mmc1.cpu_write_on_cycle(0x8000, 0x01, 10);
+        mmc1.cpu_write_on_cycle(0x8000, 0x01, 11); // a read-modify-write's second write
+        assert_eq!(mmc1.shift_count, 1);
+        mmc1.cpu_write_on_cycle(0x8000, 0x01, 13);
+        assert_eq!(mmc1.shift_count, 2);
     }
 }
