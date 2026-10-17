@@ -77,14 +77,17 @@ pub struct Pulse {
     sweep_shift: u8,
     sweep_divider: u8,
     sweep_reload: bool,
+    muted: bool
 }
 
 impl Pulse {
     fn new(is_pulse1: bool) -> Self {
-        Pulse {
+        let mut pulse = Pulse {
             is_pulse1,
             ..Default::default()
-        }
+        };
+        pulse.update_muted();
+        pulse
     }
 
     fn write_control(&mut self, value: u8) {
@@ -99,14 +102,17 @@ impl Pulse {
         self.sweep_negate = value & 0x08 != 0;
         self.sweep_shift = value & 0x07;
         self.sweep_reload = true;
+        self.update_muted();
     }
 
     fn write_timer_lo(&mut self, value: u8) {
         self.timer_period = (self.timer_period & 0x0700) | value as u16;
+        self.update_muted();
     }
 
     fn write_timer_hi(&mut self, value: u8) {
         self.timer_period = (self.timer_period & 0x00ff) | (((value & 0x07) as u16) << 8);
+        self.update_muted();
         if self.enabled {
             self.length = LENGTH_TABLE[(value >> 3) as usize];
         }
@@ -121,12 +127,15 @@ impl Pulse {
         }
     }
 
-    fn clock_timer(&mut self) {
+    #[inline]
+    fn clock_timer(&mut self) -> bool{
         if self.timer == 0 {
             self.timer = self.timer_period;
             self.duty_pos = (self.duty_pos + 1) & 7;
+            true
         } else {
             self.timer -= 1;
+            false
         }
     }
 
@@ -140,14 +149,20 @@ impl Pulse {
         }
     }
 
+    fn update_muted(&mut self) {
+        self.muted = self.timer_period < 8 || self.sweep_target() > 0x7FF;
+    }
+
+    #[inline]
     fn is_muted(&self) -> bool {
-        self.timer_period < 8 || self.sweep_target() > 0x7ff
+        self.muted
     }
 
     fn clock_sweep(&mut self) {
         if self.sweep_divider == 0 && self.sweep_enabled && self.sweep_shift > 0 && !self.is_muted()
         {
             self.timer_period = self.sweep_target().max(0) as u16;
+            self.update_muted();
         }
         if self.sweep_divider == 0 || self.sweep_reload {
             self.sweep_divider = self.sweep_period;
@@ -213,14 +228,17 @@ impl Triangle {
         }
     }
 
-    fn clock_timer(&mut self) {
+    #[inline]
+    fn clock_timer(&mut self) -> bool {
         if self.timer == 0 {
             self.timer = self.timer_period;
             if self.length > 0 && self.linear_counter > 0 && self.timer_period >= 2 {
                 self.seq_pos = (self.seq_pos + 1) & 31;
             }
+            true
         } else {
             self.timer -= 1;
+            false
         }
     }
 
@@ -295,14 +313,17 @@ impl Noise {
         }
     }
 
-    fn clock_timer(&mut self) {
+    #[inline]
+    fn clock_timer(&mut self) -> bool {
         if self.timer == 0 {
             self.timer = self.timer_period - 1;
             let tap = if self.mode { 6 } else { 1 };
             let feedback = (self.shift & 1) ^ ((self.shift >> tap) & 1);
             self.shift = (self.shift >> 1) | (feedback << 14);
+            true
         } else {
             self.timer -= 1;
+            false
         }
     }
 
@@ -408,10 +429,11 @@ impl Dmc {
         }
     }
 
-    fn clock_timer(&mut self) {
+    #[inline]
+    fn clock_timer(&mut self) -> bool{
         if self.timer > 0 {
             self.timer -= 1;
-            return;
+            return false;
         }
         self.timer = self.rate - 1;
 
@@ -437,6 +459,7 @@ impl Dmc {
                 None => self.silence = true,
             }
         }
+        true
     }
 
     fn output(&self) -> u8 {
@@ -518,6 +541,9 @@ pub struct APU {
     high_pass_440: HighPass,
     low_pass_14k: LowPass,
     samples: Vec<f32>,
+
+    mix_cache: f32,
+    mix_dirty: bool
 }
 
 impl APU {
@@ -556,6 +582,8 @@ impl APU {
             high_pass_440: HighPass::new(440.0, sample_rate as f32),
             low_pass_14k: LowPass::new(14000.0, sample_rate as f32),
             samples: Vec::with_capacity(sample_rate as usize / 30),
+            mix_cache: 0.0,
+            mix_dirty: true
         }
     }
 
@@ -576,6 +604,7 @@ impl APU {
     }
 
     pub fn write_register(&mut self, addr: u16, value: u8) {
+        self.mix_dirty = true;
         match addr {
             0x4000 => self.pulse1.write_control(value),
             0x4001 => self.pulse1.write_sweep(value),
@@ -647,10 +676,12 @@ impl APU {
     }
 
     pub fn dmc_provide_byte(&mut self, byte: u8) {
+        self.mix_dirty = true;
         self.dmc.provide_byte(byte);
     }
 
     fn quarter_frame(&mut self) {
+        self.mix_dirty = true;
         self.pulse1.envelope.clock();
         self.pulse2.envelope.clock();
         self.noise.envelope.clock();
@@ -658,6 +689,7 @@ impl APU {
     }
 
     fn half_frame(&mut self) {
+        self.mix_dirty = true;
         self.pulse1.clock_length();
         self.pulse1.clock_sweep();
         self.pulse2.clock_length();
@@ -692,16 +724,21 @@ impl APU {
     pub fn tick(&mut self) {
         self.clock_frame_sequencer();
 
-        self.triangle.clock_timer();
-        self.noise.clock_timer();
-        self.dmc.clock_timer();
+        let mut changed = self.triangle.clock_timer();
+        changed |= self.noise.clock_timer();
+        changed |= self.dmc.clock_timer();
         if self.odd_cycle {
-            self.pulse1.clock_timer();
-            self.pulse2.clock_timer();
+            changed |= self.pulse1.clock_timer();
+            changed |= self.pulse2.clock_timer();
         }
         self.odd_cycle = !self.odd_cycle;
 
-        self.sample_sum += self.mix();
+        if changed || self.mix_dirty {
+            self.mix_cache = self.mix();
+            self.mix_dirty = false;
+        }
+
+        self.sample_sum += self.mix_cache;
         self.sample_count += 1;
         self.sample_phase += self.sample_rate * self.rate_adjust;
         if self.sample_phase >= self.cpu_clock {

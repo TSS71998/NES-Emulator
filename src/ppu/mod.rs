@@ -48,6 +48,12 @@ pub struct NesPPU {
 
     internal_data_buf: u8,
     region: Region,
+    vblank_line: u16,
+    prerender_line: u16,
+    lines_per_frame: u16,
+    skips_odd_dot: bool,
+    nametable_base: [u16; 4],
+    mapper_watches_bus: bool,
     odd_frame: bool,
     
     pub scanline: u16,
@@ -84,8 +90,16 @@ pub trait PPU {
 
 impl NesPPU {
     pub fn new(mapper: SharedMapper) -> Self {
-        NesPPU {
+        let mapper_watches_bus = mapper.borrow().watches_ppu_bus();
+        let region = Region::Ntsc;
+        let mut ppu = NesPPU {
             mapper,
+            vblank_line: region.vblank_scanline(),
+            prerender_line: region.prerender_scanline(),
+            lines_per_frame: region.scanlines_per_frame(),
+            skips_odd_dot: region.skips_odd_frame_dot(),
+            nametable_base: [0; 4],
+            mapper_watches_bus,
             vram: [0; 4096],
             oam_data: [0; 64 * 4],
             oam_addr: 0,
@@ -98,7 +112,7 @@ impl NesPPU {
             fine_x: 0,
             write_latch: false,
             internal_data_buf: 0,
-            region: Region::Ntsc,
+            region,
             odd_frame: false,
             scanline: 0,
             dot: 0,
@@ -109,6 +123,15 @@ impl NesPPU {
             bg: Background::default(),
             sprites: Sprites::default(),
             frame: Frame::new(),
+        };
+        ppu.refresh_mirroring();
+        ppu
+    }
+
+    pub fn refresh_mirroring(&mut self) {
+        let mirroring = self.mapper.borrow().mirroring();
+        for (nt, base) in self.nametable_base.iter_mut().enumerate() {
+            *base = mirror_nametable(mirroring, 0x2000 + nt as u16 * 0x400);
         }
     }
 
@@ -157,6 +180,10 @@ impl NesPPU {
 
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
+        self.vblank_line = region.vblank_scanline();
+        self.prerender_line = region.prerender_scanline();
+        self.lines_per_frame = region.scanlines_per_frame();
+        self.skips_odd_dot = region.skips_odd_frame_dot();
     }
 
     pub fn region(&self) -> Region {
@@ -169,11 +196,14 @@ impl NesPPU {
 
     fn is_rendering(&self) -> bool {
         self.rendering_enabled()
-            && (self.scanline < 240 || self.scanline == self.region.prerender_scanline())
+            && (self.scanline < 240 || self.scanline == self.prerender_line)
     }
 
+    #[inline]
     fn bus_address(&mut self, addr: u16) {
-        self.mapper.borrow_mut().ppu_address(addr, self.ppu_cycle);
+        if self.mapper_watches_bus {
+            self.mapper.borrow_mut().ppu_address(addr, self.ppu_cycle);
+        }
     }
 
     fn increment_vram_addr(&mut self) {
@@ -187,8 +217,9 @@ impl NesPPU {
     }
 
     /// Maps a nametable address ($2000-$3EFF) to an index into `vram`
+    #[inline]
     pub fn mirror_vram_addr(&self, addr: u16) -> u16 {
-        mirror_nametable(self.mirroring(), addr)
+        self.nametable_base[((addr >> 10) & 3) as usize] + (addr & 0x3FF)
     }
 
     pub fn tick(&mut self, dots: u8) -> bool {
@@ -201,6 +232,7 @@ impl NesPPU {
 
     /// Advances one dot and emulates it. Returns true when the frame has just
     /// finished (the pre-render line ended), with `frame` holding the picture.
+    #[inline]
     pub fn step_dot(&mut self) -> bool {
         self.ppu_cycle += 1;
         let mut new_frame = false;
@@ -209,7 +241,7 @@ impl NesPPU {
         } else {
             self.dot = 0;
             self.scanline += 1;
-            if self.scanline == self.region.scanlines_per_frame() {
+            if self.scanline == self.lines_per_frame {
                 self.scanline = 0;
                 self.odd_frame = !self.odd_frame;
                 new_frame = true;
@@ -217,13 +249,13 @@ impl NesPPU {
         }
 
         let line = self.scanline;
-        let prerender = self.region.prerender_scanline();
+        let prerender = self.prerender_line;
         if line < 240 || line == prerender {
             self.render_dot();
         }
 
         if self.dot == 1 {
-            if line == self.region.vblank_scanline() {
+            if line == self.vblank_line {
                 if !self.suppress_vblank {
                     self.status.set_vblank_status(true);
                 }
@@ -235,7 +267,7 @@ impl NesPPU {
             self.suppress_vblank = false;
         }
 
-        if self.dot == 2 && (line == self.region.vblank_scanline() || line == prerender) {
+        if self.dot == 2 && (line == self.vblank_line || line == prerender) {
             self.update_nmi_line();
         }
 
@@ -244,7 +276,7 @@ impl NesPPU {
         if line == prerender 
             && self.dot == 339
             && self.odd_frame
-            && self.region.skips_odd_frame_dot()
+            && self.skips_odd_dot
             && self.rendering_enabled()
         {
             self.dot = 340;
@@ -389,7 +421,7 @@ impl PPU for NesPPU {
     }
 
     fn read_status(&mut self) -> u8 {
-        if self.scanline == self.region.vblank_scanline() && self.dot == 0 {
+        if self.scanline == self.vblank_line && self.dot == 0 {
             // one dot before the flag is set: it reads as clear and won't be set
             self.suppress_vblank = true;
         }

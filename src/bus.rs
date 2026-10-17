@@ -49,6 +49,11 @@ pub struct Bus<'call> {
 
     cycles: usize,
     region: Region,
+
+    cpu_divider: u64,
+    ppu_divider: u64,
+    read_point: u64,
+    write_point: u64,
     
     // Master clock ticks (see Region) since power-on, and how far the PPU
     // has been run. Each CPU cycle is split around its memory access, so the
@@ -98,6 +103,10 @@ impl<'a> Bus<'a> {
             prev_run_irq: false,
             irq_mask: true,
             region: Region::Ntsc,
+            cpu_divider: Region::Ntsc.cpu_divider() as u64,
+            ppu_divider: Region::Ntsc.ppu_divider() as u64,
+            read_point: Region::Ntsc.cpu_divider() as u64 / 2 - 1,
+            write_point: Region::Ntsc.cpu_divider() as u64 / 2 + 1, 
             gameloop_callback: Box::from(gameloop_callback),
             audio_callback: None,
             joypads: [Joypad::new(), Joypad::new()],
@@ -114,6 +123,10 @@ impl<'a> Bus<'a> {
 
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
+        self.cpu_divider = region.cpu_divider() as u64;
+        self.ppu_divider = region.ppu_divider() as u64;
+        self.read_point = self.cpu_divider / 2 - 1;
+        self.write_point = self.cpu_divider / 2 + 1;
         self.ppu.set_region(region);
         self.apu.set_region(region);
     }
@@ -185,9 +198,9 @@ impl<'a> Bus<'a> {
     /// Master clock ticks from the start of a CPU cycle to its access. Reads
     /// land a little before the middle of the cycle and writes a little
     /// after (on NTSC 5 and 7 of 12 ticks), as in Mesen.
+    #[inline]
     fn access_point(&self, read: bool) -> u64 {
-        let half = self.region.cpu_divider() as u64 / 2;
-        if read { half - 1 } else { half + 1 }
+        if read { self.read_point } else { self.write_point }
     }
 
     fn start_cycle(&mut self, read: bool) {
@@ -205,7 +218,7 @@ impl<'a> Bus<'a> {
     }
 
     fn end_cycle(&mut self, read: bool) {
-        self.master_clock += self.region.cpu_divider() as u64 - self.access_point(read);
+        self.master_clock += self.cpu_divider - self.access_point(read);
         self.run_ppu();
 
         // NMI is edge-triggered: the CPU latches the line going high. What
@@ -222,7 +235,7 @@ impl<'a> Bus<'a> {
     }
 
     fn run_ppu(&mut self) {
-        let divider = self.region.ppu_divider() as u64;
+        let divider = self.ppu_divider;
         while self.ppu_clock + divider <= self.master_clock {
             self.ppu_clock += divider;
             if self.ppu.step_dot() {
@@ -338,7 +351,10 @@ impl Mem for Bus<'_> {
 
             0x4018..=0x401F => { /* CPU test mode registers */ }
 
-            0x4020..=0xFFFF => self.mapper.borrow_mut().cpu_write(addr, data),
+            0x4020..=0xFFFF => {
+                self.mapper.borrow_mut().cpu_write(addr, data);
+                self.ppu.refresh_mirroring();
+            }
         }
     }
 }

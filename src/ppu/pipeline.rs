@@ -93,7 +93,7 @@ impl NesPPU {
         if dot == 256 {
             self.increment_y();
         }
-        if self.scanline == self.region.prerender_scanline() && (280..=304).contains(&dot) {
+        if self.scanline == self.prerender_line && (280..=304).contains(&dot) {
             self.copy_vertical();
         }
     }
@@ -160,7 +160,7 @@ impl NesPPU {
     }
 
     fn read_nametable(&self, addr: u16) -> u8 {
-        self.vram[super::mirror_nametable(self.mirroring(), addr) as usize]
+        self.vram[self.mirror_vram_addr(addr) as usize]
     }
 
     pub(super) fn increment_coarse_x(&mut self) {

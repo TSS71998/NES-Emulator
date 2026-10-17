@@ -226,6 +226,10 @@ impl Mapper for Mmc3 {
         self.irq_pending
     }
 
+    fn watches_ppu_bus(&self) -> bool {
+        true
+    }
+
     fn battery_ram(&self) -> Option<&[u8]> {
         self.has_battery.then_some(&self.prg_ram[..])
     }

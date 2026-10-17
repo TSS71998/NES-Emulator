@@ -51,6 +51,10 @@ pub trait Mapper {
         false
     }
 
+    fn watches_ppu_bus(&self) -> bool {
+        false
+    }
+
     /// Battery-backed PRG-RAM to write to a .sav file, if the cartridge has any.
     fn battery_ram(&self) -> Option<&[u8]> {
         None
@@ -251,6 +255,10 @@ pub(crate) mod test_util {
 
         fn irq_pending(&self) -> bool {
             self.irq
+        }
+
+        fn watches_ppu_bus(&self) -> bool {
+            true
         }
     }
 }

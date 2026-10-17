@@ -5,5 +5,9 @@ edition = "2024"
 
 [dependencies]
 bitflags = "1.2.1"
-
 sdl2 = "0.38.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
