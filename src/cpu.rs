@@ -236,6 +236,21 @@ impl<'a> CPU<'a> {
         self.mem_read(addr)
     }
 
+    /// The unstable stores SHA/AHX, SHX, SHY and TAS write `value & (H + 1)`,
+    /// where H is the high byte of the address *before* indexing. If the
+    /// index crosses a page, that same value also replaces the high byte of
+    /// the address written to. 
+    fn unstable_store(&mut self, base: u16, index: u8, value: u8) {
+        let addr = base.wrapping_add(index as u16);
+        let data = value & ((base >> 8) as u8).wrapping_add(1);
+        let addr = if page_cross(base, addr) {
+            (data as u16) << 8 | (addr & 0x00FF)
+        } else {
+            addr
+        };
+        self.write_result(addr, data);
+    }
+
     /// Writes an instruction's result on its last cycle.
     fn write_result(&mut self, addr: u16, data: u8) {
         self.wait_for_last_cycle();
@@ -1022,11 +1037,7 @@ impl<'a> CPU<'a> {
                 let mut data = self.mem_read(addr);
                 data = data.wrapping_sub(1);
                 self.write_result(addr, data);
-                // self._update_zero_and_negative_flags(data);
-                if data <= self.register_a {
-                    self.status.insert(CpuFlags::CARRY);
-                }
-
+                self.status.set(CpuFlags::CARRY, data <= self.register_a);
                 self.update_zero_and_negative_flags(self.register_a.wrapping_sub(data));
             }
 
@@ -1060,9 +1071,7 @@ impl<'a> CPU<'a> {
                 let x_and_a = self.register_x & self.register_a;
                 let result = x_and_a.wrapping_sub(data);
 
-                if data <= x_and_a {
-                    self.status.insert(CpuFlags::CARRY);
-                }
+                self.status.set(CpuFlags::CARRY, data <= x_and_a);
                 self.update_zero_and_negative_flags(result);
 
                 self.register_x = result;
@@ -1184,48 +1193,35 @@ impl<'a> CPU<'a> {
 
             /* TAS */
             0x9b => {
-                let data = self.register_a & self.register_x;
-                self.stack_pointer = data;
-                let mem_address = self
-                    .mem_read_u16(self.program_counter)
-                    .wrapping_add(self.register_y as u16);
-
-                let data = ((mem_address >> 8) as u8).wrapping_add(1) & self.stack_pointer;
-                self.write_result(mem_address, data)
+                self.stack_pointer = self.register_a & self.register_x;
+                let base = self.mem_read_u16(self.program_counter);
+                self.unstable_store(base, self.register_y, self.stack_pointer);
             }
 
             /* AHX  Indirect Y */
             0x93 => {
-                let (mem_address, _) = self.get_operand_address(&AddressingMode::Indirect_Y);
-                let data = self.register_a & self.register_x & (mem_address >> 8) as u8;
-                self.write_result(mem_address, data)
+                let zp = self.mem_read(self.program_counter);
+                let lo = self.mem_read(zp as u16) as u16;
+                let hi = self.mem_read(zp.wrapping_add(1) as u16) as u16;
+                self.unstable_store(hi << 8 | lo, self.register_y, self.register_a & self.register_x);
             }
 
             /* AHX Absolute Y*/
             0x9f => {
-                let mem_address = self
-                    .mem_read_u16(self.program_counter)
-                    .wrapping_add(self.register_y as u16);
-                let data = self.register_a & self.register_x & (mem_address >> 8) as u8;
-                self.write_result(mem_address, data)
+                let base = self.mem_read_u16(self.program_counter);
+                self.unstable_store(base, self.register_y, self.register_a & self.register_x);
             }
 
             /* SHX */
             0x9e => {
-                let mem_address = self
-                    .mem_read_u16(self.program_counter)
-                    .wrapping_add(self.register_y as u16);
-                let data = self.register_x & ((mem_address >> 8) as u8).wrapping_add(1);
-                self.write_result(mem_address, data)
+                let base = self.mem_read_u16(self.program_counter);
+                self.unstable_store(base, self.register_y, self.register_x);
             }
 
             /* SHY */
             0x9c => {
-                let mem_address = self
-                    .mem_read_u16(self.program_counter)
-                    .wrapping_add(self.register_x as u16);
-                let data = self.register_y & ((mem_address >> 8) as u8).wrapping_add(1);
-                self.write_result(mem_address, data)
+                let base = self.mem_read_u16(self.program_counter);
+                self.unstable_store(base, self.register_x, self.register_y);
             }
         }
 

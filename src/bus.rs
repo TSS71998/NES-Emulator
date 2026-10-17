@@ -292,6 +292,9 @@ impl<'a> Bus<'a> {
 
 impl Mem for Bus<'_> {
     fn mem_read(&mut self, addr: u16) -> u8 {
+        if addr == 0x4015 {
+            return (self.apu.read_status() & !0x20) | (self.open_bus & 0x20);
+        }
         let value = match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
             0x2000..=0x3FFF => match addr & 0x2007 {
@@ -300,8 +303,6 @@ impl Mem for Bus<'_> {
                 0x2007 => self.ppu.read_data(),
                 _ => self.open_bus,
             },
-
-            0x4015 => self.apu.read_status(),
             0x4016 => (self.open_bus & 0xE0) | self.joypads[0].read(),
             0x4017 => (self.open_bus & 0xE0) | self.joypads[1].read(),
 
