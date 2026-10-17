@@ -134,6 +134,7 @@ impl<'a> Bus<'a> {
         for _ in 0..cycles {
             self.idle_cycle();
         }
+        self.instruction_cycles = 0;
         self.run_dma();
     }
 
@@ -145,9 +146,9 @@ impl<'a> Bus<'a> {
     }
 
     pub fn cpu_write(&mut self, addr: u16, data: u8) {
-        self.start_cycle(true);
+        self.start_cycle(false);
         self.mem_write(addr, data);
-        self.end_cycle(true);
+        self.end_cycle(false);
     }
 
     pub fn idle_cycle(&mut self) {
@@ -190,7 +191,7 @@ impl<'a> Bus<'a> {
     }
 
     fn start_cycle(&mut self, read: bool) {
-        self.instruction_cycles += 1;
+        self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.cycles += 1;
         self.master_clock += self.access_point(read);
         self.run_ppu();

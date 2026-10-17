@@ -199,7 +199,7 @@ impl NesPPU {
         new_frame
     }
 
-    /// Advances one dot and emuslates it. Returns true when the frame has just
+    /// Advances one dot and emulates it. Returns true when the frame has just
     /// finished (the pre-render line ended), with `frame` holding the picture.
     pub fn step_dot(&mut self) -> bool {
         self.ppu_cycle += 1;
