@@ -1,43 +1,71 @@
+//! The 2C02 picture processing unit, emulated one dot (PPU clock) at a time.
+//!
+//! Each scanline is 341 dots. On the 240 visible lines and the pre-render
+//! line the PPU fetches background tiles every 8 dots into shift registers,
+//! evaluates and fetches the sprites for the next line during dots 257-320,
+//! and outputs one pixel per dot during dots 1-256. Scrolling uses the real
+//! internal registers ("loopy" v, t, x and w), so mid-frame writes to
+//! $2000/$2005/$2006 take effect at the exact dot they happen on.
+//!
+//! The pipeline itself lives in `pipeline.rs`; this file has the CPU-facing
+//! registers and the frame timing (vblank, NMI, odd-frame skip).
+
 use crate::cartridge::Mirroring;
 use crate::mapper::SharedMapper;
 use crate::region::Region;
-use crate::render;
 use crate::render::frame::Frame;
-use registers::addr::AddrRegister;
 use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
-use registers::scroll::ScrollRegister;
 use registers::status::StatusRegister;
 
-pub mod registers;
+mod registers;
+pub mod pipeline;
+
+use pipeline::{Background, Sprites};
 
 pub struct NesPPU {
     mapper: SharedMapper,
     pub palette_table: [u8; 32],
     pub vram: [u8; 4096],
 
-    pub addr: AddrRegister,
     pub ctrl: ControlRegister,
     pub mask: MaskRegister,
     pub status: StatusRegister,
-    pub scroll: ScrollRegister,
 
     pub oam_data: [u8; 256],
     pub oam_addr: u8,
 
+    // Loopy's registers (https://www.nesdev.org/wiki/PPU_scrolling):
+    // v is the current VRAM address, and while rendering also the scroll
+    // position (yyy NN YYYYY XXXXX: fine Y, nametable, coarse Y, coarse X);
+    // t is the temporary address that $2000/$2005/$2006 write into; fine_x
+    // is the 3-bit fine X scroll; write_latch is the shared $2005/$2006
+    // first/second write toggle.
+    v: u16,
+    t: u16,
+    fine_x: u8,
     write_latch: bool,
-    odd_frame: bool,
-    region: Region,
-    render_y_bump: u16,
 
     internal_data_buf: u8,
-    pub scanlines: u16,
-    cycles: usize,
-    pub nmi_pending: bool,
-    // (scroll_x, scroll_y, nametable_addr) in effect for each visible scanline,
-    // so mid-frame scroll splits (e.g. SMB status bar) render correctly
-    pub scanline_scroll: [(u8, u8, u16); 240],
-    pub frame: Frame,
+    region: Region,
+    odd_frame: bool,
+    
+    pub scanline: u16,
+    pub dot: u16,
+    ppu_cycle: u64,
+    
+    /// A $2002 read one dot before vblank starts reads the flag as clear and
+    /// stops it being set (and the NMI) for that frame.
+    suppress_vblank: bool,
+    rendering: bool,
+    /// The PPU's /NMI output: vblank flag AND the NMI enable bit. The CPU
+    /// detects its rising edge (see Bus).
+    nmi_line: bool,
+
+    bg: Background,
+    sprites: Sprites,
+
+    pub frame: Frame
 }
 
 pub trait PPU {
@@ -62,22 +90,25 @@ impl NesPPU {
             oam_data: [0; 64 * 4],
             oam_addr: 0,
             palette_table: [0; 32],
-            internal_data_buf: 0,
-            cycles: 0,
-            scanlines: 0,
-            nmi_pending: false,
-            scanline_scroll: [(0, 0, 0x2000); 240],
-            frame: Frame::new(),
-            write_latch: false,
-            odd_frame: false,
-            region: Region::Ntsc,
-            render_y_bump: 0,
-
-            addr: AddrRegister::new(),
             ctrl: ControlRegister::new(),
             mask: MaskRegister::new(),
-            scroll: ScrollRegister::new(),
             status: StatusRegister::new(),
+            v: 0,
+            t: 0,
+            fine_x: 0,
+            write_latch: false,
+            internal_data_buf: 0,
+            region: Region::Ntsc,
+            odd_frame: false,
+            scanline: 0,
+            dot: 0,
+            ppu_cycle: 0,
+            suppress_vblank: false,
+            nmi_line: false,
+            rendering: false,
+            bg: Background::default(),
+            sprites: Sprites::default(),
+            frame: Frame::new(),
         }
     }
 
@@ -101,6 +132,11 @@ impl NesPPU {
 
     pub fn mirroring(&self) -> Mirroring {
         self.mapper.borrow().mirroring()
+    }
+
+    /// The VRAM address register (loopy v), as used by $2007.
+    pub fn vram_addr(&self) -> u16 {
+        self.v & 0x3FFF
     }
 
     /// Pattern-table address of the low bitplane for `row` of a sprite's tile
@@ -127,184 +163,125 @@ impl NesPPU {
         self.region
     }
 
+    fn rendering_enabled(&self) -> bool {
+        self.rendering
+    }
+
     fn is_rendering(&self) -> bool {
-        (self.mask.show_background() || self.mask.show_sprites())
-            && (self.scanlines < 240 || self.scanlines == self.region.prerender_scanline())
+        self.rendering_enabled()
+            && (self.scanline < 240 || self.scanline == self.region.prerender_scanline())
+    }
+
+    fn bus_address(&mut self, addr: u16) {
+        self.mapper.borrow_mut().ppu_address(addr, self.ppu_cycle);
     }
 
     fn increment_vram_addr(&mut self) {
         if self.is_rendering() {
-            self.render_y_bump += 1;
+            self.increment_coarse_x();
+            self.increment_y();
         } else {
-            self.addr.increment(self.ctrl.vram_addr_increment());
-            self.report_address();
+            self.v = (self.v + self.ctrl.vram_addr_increment() as u16) & 0x7FFF;
+            self.bus_address(self.v & 0x3FFF);
         }
-    }
-
-    fn report_address(&mut self) {
-        if !self.is_rendering() {
-            self.mapper.borrow_mut().ppu_address(self.addr.get());
-        }
-    }
-
-    fn current_scroll(&self) -> (u8, u8, u16) {
-        let mut nametable = self.ctrl.nametable_addr();
-        let mut y = self.scroll.scroll_y as u16 + self.render_y_bump;
-
-        while y >= 240 {
-            y -= 240;
-            nametable ^= 0x800;
-        }
-        (self.scroll.scroll_x, y as u8, nametable)
     }
 
     /// Maps a nametable address ($2000-$3EFF) to an index into `vram`
     pub fn mirror_vram_addr(&self, addr: u16) -> u16 {
-        let vram_index = (addr & 0x2FFF) - 0x2000;
-        let name_table = vram_index / 0x400;
-        let offset = vram_index & 0x3FF;
-        match (self.mirroring(), name_table) {
-            (Mirroring::Vertical, 2) | (Mirroring::Vertical, 3) => vram_index - 0x800,
-            (Mirroring::Horizontal, 1) | (Mirroring::Horizontal, 2) => vram_index - 0x400,
-            (Mirroring::Horizontal, 3) => vram_index - 0x800,
-            (Mirroring::SingleScreenLower, _) => offset,
-            (Mirroring::SingleScreenUpper, _) => 0x400 + offset,
-            _ => vram_index,
-        }
+        mirror_nametable(self.mirroring(), addr)
     }
 
-    pub fn tick(&mut self, cycles: u8) -> bool {
-        self.cycles += cycles as usize;
-        let rendering = self.mask.show_background() || self.mask.show_sprites();
-        let prerender = self.region.prerender_scanline();
-        let skip_dot = self.region.skips_odd_frame_dot() && self.odd_frame && rendering;
-        let line_len = if self.scanlines == prerender && skip_dot { 340 } else { 341 };
+    pub fn tick(&mut self, dots: u8) -> bool {
+        let mut new_frame = false;
+        for _ in 0..dots {
+            new_frame |= self.step_dot();
+        }
+        new_frame
+    }
 
-        if self.cycles >= line_len {
-            if self.is_sprite_0_hit() {
-                self.status.set_sprite_zero_hit(true);
-            }
-
-            let line = self.scanlines as usize;
-            if line < 240 {
-                let scroll = self.current_scroll();
-                self.scanline_scroll[line] = scroll;
-                self.render_scanline(line, scroll);
-            }
-
-            if rendering && (line < 240 || line == prerender as usize) {
-                self.mapper.borrow_mut().scanline();
-            }
-
-            self.cycles = self.cycles - line_len;
-            self.scanlines += 1;
-
-            if self.scanlines == self.region.vblank_scanline() {
-                self.status.set_vblank_status(true);
-                self.status.set_sprite_zero_hit(false);
-                if self.ctrl.generate_vblank_nmi() {
-                    self.nmi_pending = true;
-                }
-            }
-
-            if self.scanlines >= self.region.scanlines_per_frame() {
-                self.scanlines = 0;
+    /// Advances one dot and emuslates it. Returns true when the frame has just
+    /// finished (the pre-render line ended), with `frame` holding the picture.
+    pub fn step_dot(&mut self) -> bool {
+        self.ppu_cycle += 1;
+        let mut new_frame = false;
+        if self.dot < 340 {
+            self.dot += 1;
+        } else {
+            self.dot = 0;
+            self.scanline += 1;
+            if self.scanline == self.region.scanlines_per_frame() {
+                self.scanline = 0;
                 self.odd_frame = !self.odd_frame;
-                self.nmi_pending = false;
-                self.render_y_bump = 0;
-                self.status.set_sprite_zero_hit(false);
+                new_frame = true;
+            }
+        }
+
+        let line = self.scanline;
+        let prerender = self.region.prerender_scanline();
+        if line < 240 || line == prerender {
+            self.render_dot();
+        }
+
+        if self.dot == 1 {
+            if line == self.region.vblank_scanline() {
+                if !self.suppress_vblank {
+                    self.status.set_vblank_status(true);
+                }
+            } else if line == prerender {
                 self.status.reset_vblank_status();
-                return true;
+                self.status.set_sprite_zero_hit(false);
+                self.status.set_sprite_overflow(false);
             }
+            self.suppress_vblank = false;
         }
-        return false;
+
+        if self.dot == 2 && (line == self.region.vblank_scanline() || line == prerender) {
+            self.update_nmi_line();
+        }
+
+        // NTSC drops the last dot of the pre-render line on odd frames when
+        // rendering is on, so the frame is 89341.5 dots on average
+        if line == prerender 
+            && self.dot == 339
+            && self.odd_frame
+            && self.region.skips_odd_frame_dot()
+            && self.rendering_enabled()
+        {
+            self.dot = 340;
+        }
+        self.rendering = self.mask.show_background() || self.mask.show_sprites();
+        new_frame
     }
 
-    fn render_scanline(&mut self, line: usize, scroll: (u8, u8, u16)) {
-        let mut frame = std::mem::take(&mut self.frame);
-        render::render_scanline(self, line, scroll, &mut frame);
-        self.frame = frame;
+    fn update_nmi_line(&mut self) {
+        self.nmi_line = self.status.is_in_vblank() && self.ctrl.generate_vblank_nmi();
     }
 
-    /// Returns the logical nametable's offset into vram, the tile column/row and the
-    /// 2-bit pixel value of the background at a screen position for the given
-    /// (scroll_x, scroll_y, nametable_addr).
-    pub fn bg_pixel(
-        &self,
-        screen_x: usize,
-        screen_y: usize,
-        scroll: (u8, u8, u16),
-    ) -> (usize, usize, usize, u8) {
-        let (scroll_x, scroll_y, nametable_addr) = scroll;
-        let base_nt = ((nametable_addr - 0x2000) / 0x400) as usize;
-
-        // position in the 512x480 space made of the 4 logical nametables
-        let world_x = screen_x + scroll_x as usize + (base_nt & 1) * 256;
-        let world_y = screen_y + scroll_y as usize + (base_nt >> 1) * 240;
-        let nt_x = (world_x / 256) % 2;
-        let nt_y = (world_y / 240) % 2;
-        let x = world_x % 256;
-        let y = world_y % 240;
-        let tile_column = x / 8;
-        let tile_row = y / 8;
-
-        // mirror_vram_addr maps the logical nametable onto physical vram
-        let nt_start = self.mirror_vram_addr(0x2000 + ((nt_y * 2 + nt_x) * 0x400) as u16) as usize;
-        let tile_idx = self.vram[nt_start + tile_row * 32 + tile_column] as usize;
-        let row_addr = self.ctrl.bknd_pattern_addr() + (tile_idx * 16 + y % 8) as u16;
-
-        let shift = 7 - (x % 8);
-        let low_plane = (self.chr_read(row_addr) >> shift) & 1;
-        let high_plane = (self.chr_read(row_addr + 8) >> shift) & 1;
-        (nt_start, tile_column, tile_row, high_plane << 1 | low_plane)
+    pub fn nmi_line(&self) -> bool {
+        self.nmi_line
     }
 
-    // Sprite 0 hit is set on the first pixel where an opaque sprite 0 pixel
-    // overlaps an opaque background pixel, checked once per visible scanline.
-    fn is_sprite_0_hit(&self) -> bool {
-        let line = self.scanlines as usize;
-        if line >= 240 || !self.mask.show_background() || !self.mask.show_sprites() {
-            return false;
-        }
-
-        // sprites are displayed one line below their OAM y
-        let sprite_y = self.oam_data[0] as usize + 1;
-        let height = self.ctrl.sprite_size() as usize;
-        if line < sprite_y || line >= sprite_y + height {
-            return false;
-        }
-
-        let attr = self.oam_data[2];
-        let sprite_x = self.oam_data[3] as usize;
-        let mut row = line - sprite_y;
-        if attr >> 7 & 1 == 1 {
-            row = height - 1 - row;
-        }
-
-        let row_addr = self.sprite_row_addr(self.oam_data[1], row);
-        let low_plane = self.chr_read(row_addr);
-        let high_plane = self.chr_read(row_addr + 8);
-
-        let scroll = self.current_scroll();
-        for col in 0..8 {
-            let x = sprite_x + col;
-            // no hit at x=255
-            if x >= 255 {
-                break;
-            }
-            let shift = if attr >> 6 & 1 == 1 { col } else { 7 - col };
-            let pixel = ((high_plane >> shift) & 1) << 1 | ((low_plane >> shift) & 1);
-            if pixel != 0 && self.bg_pixel(x, line, scroll).3 != 0 {
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn poll_nmi_interrupt(&mut self) -> bool {
-        std::mem::take(&mut self.nmi_pending)
+    pub fn is_odd_frame(&self) -> bool {
+        self.odd_frame
     }
 }
+
+/// Maps a nametable address ($2000-$3EFF) to an index into the PPU's 4 KiB
+/// of nametable memory (2 KiB on the console; four-screen carts add 2 KiB).
+fn mirror_nametable(mirroring: Mirroring, addr: u16) -> u16 {
+    let vram_index = addr & 0x0FFF;
+    let name_table = vram_index / 0x400;
+    let offset = vram_index & 0x3FF;
+    match (mirroring, name_table) {
+        (Mirroring::Vertical, 2) | (Mirroring::Vertical, 3) => vram_index - 0x800,
+        (Mirroring::Horizontal, 1) | (Mirroring::Horizontal, 2) => vram_index - 0x400,
+        (Mirroring::Horizontal, 3) => vram_index - 0x800,
+        (Mirroring::SingleScreenLower, _) => offset,
+        (Mirroring::SingleScreenUpper, _) => 0x400 + offset,
+        _ => vram_index,
+    }
+}
+
 
 fn palette_index(addr: u16) -> usize {
     let index = (addr & 0x1F) as usize;
@@ -317,27 +294,24 @@ fn palette_index(addr: u16) -> usize {
 
 impl PPU for NesPPU {
     fn write_to_ppu_addr(&mut self, value: u8) {
-        let first_write = !self.write_latch;
-        if first_write {
-            self.ctrl.set_nametable((value >> 2) & 0b11);
-            self.scroll.write_addr_hi(value);
+        if !self.write_latch {
+            // t: .CDEFGH ........ <- d: ..CDEFGH, and bit 14 is cleared
+            self.t = (self.t & 0x00FF) | ((value as u16 & 0x3F) << 8);
         } else {
-            self.scroll.write_addr_lo(value);
-            self.render_y_bump = 0;
+            self.t = (self.t & 0x7F00) | value as u16;
+            self.v = self.t;
+            if !self.is_rendering() {
+                self.bus_address(self.v & 0x3FFF);
+            }
         }
-        self.addr.update(value, first_write);
         self.write_latch = !self.write_latch;
-        if !first_write {
-            self.report_address();
-        }
     }
 
     fn write_to_ctrl(&mut self, value: u8) {
-        let before_nmi_status = self.ctrl.generate_vblank_nmi();
         self.ctrl.update(value);
-        if !before_nmi_status && self.ctrl.generate_vblank_nmi() && self.status.is_in_vblank() {
-            self.nmi_pending = true;
-        }
+        // t: ...GH.. ........ <- d: ......GH (nametable select)
+        self.t = (self.t & !0x0C00) | ((value as u16 & 0b11) << 10);
+        self.update_nmi_line();
     }
 
     fn write_to_mask(&mut self, value: u8) {
@@ -354,12 +328,21 @@ impl PPU for NesPPU {
     }
 
     fn write_to_scroll(&mut self, value: u8) {
-        self.scroll.write(value, !self.write_latch);
+        if !self.write_latch {
+            // t: ....... ...ABCDE <- d: ABCDE...; x <- d: .....FGH
+            self.t = (self.t & !0x001F) | (value as u16 >> 3);
+            self.fine_x = value & 0b111;
+        } else {
+            // t: FGH..AB CDE..... <- d: ABCDEFGH
+            self.t = (self.t & !0x73E0)
+                | ((value as u16 & 0b111) << 12)
+                | ((value as u16 & 0xF8) << 2);
+        }
         self.write_latch = !self.write_latch;
     }
 
     fn write_to_data(&mut self, value: u8) {
-        let addr = self.addr.get();
+        let addr = self.vram_addr();
         match addr {
             // CHR-RAM; the mapper ignores the write if the cartridge has CHR-ROM
             0..=0x1fff => self.mapper.borrow_mut().ppu_write(addr, value),
@@ -369,8 +352,7 @@ impl PPU for NesPPU {
             }
             // palette RAM is 6 bits wide, so only colours $00-$3F can be stored.
             // palette_index handles the $3F10/$3F14/$3F18/$3F1C mirrors.
-            0x3f00..=0x3fff => self.palette_table[palette_index(addr)] = value & 0x3F,
-            _ => panic!("unexpected access to mirrored space {}", addr),
+            _ => self.palette_table[palette_index(addr)] = value & 0x3F
         }
         self.increment_vram_addr();
     }
@@ -383,7 +365,7 @@ impl PPU for NesPPU {
     }
 
     fn read_data(&mut self) -> u8 {
-        let addr = self.addr.get();
+        let addr = self.vram_addr();
         self.increment_vram_addr();
 
         match addr {
@@ -397,14 +379,23 @@ impl PPU for NesPPU {
                 self.internal_data_buf = self.vram[self.mirror_vram_addr(addr) as usize];
                 result
             }
-            0x3f00..=0x3fff => self.palette_table[palette_index(addr)],
-            _ => panic!("unexpected access to mirrored space {}", addr),
+            // palette reads aren't buffered, but the buffer is filled with the
+            // nametable byte "underneath" the palette
+            _ => {
+                self.internal_data_buf = self.vram[self.mirror_vram_addr(addr) as usize];
+                self.palette_table[palette_index(addr)]
+            }
         }
     }
 
     fn read_status(&mut self) -> u8 {
+        if self.scanline == self.region.vblank_scanline() && self.dot == 0 {
+            // one dot before the flag is set: it reads as clear and won't be set
+            self.suppress_vblank = true;
+        }
         let data = self.status.snapshot();
         self.status.reset_vblank_status();
+        self.update_nmi_line();
         self.write_latch = false;
         data
     }
@@ -415,398 +406,4 @@ impl PPU for NesPPU {
 }
 
 #[cfg(test)]
-pub mod test {
-    use super::*;
-
-    #[test]
-    fn test_ppu_vram_writes() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ppu_addr(0x23);
-        ppu.write_to_ppu_addr(0x05);
-        ppu.write_to_data(0x66);
-
-        assert_eq!(ppu.vram[0x0305], 0x66);
-    }
-
-    #[test]
-    fn test_ppu_vram_reads() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ctrl(0);
-        ppu.vram[0x0305] = 0x66;
-
-        ppu.write_to_ppu_addr(0x23);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load_into_buffer
-        assert_eq!(ppu.addr.get(), 0x2306);
-        assert_eq!(ppu.read_data(), 0x66);
-    }
-
-    #[test]
-    fn test_ppu_vram_reads_cross_page() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ctrl(0);
-        ppu.vram[0x01ff] = 0x66;
-        ppu.vram[0x0200] = 0x77;
-
-        ppu.write_to_ppu_addr(0x21);
-        ppu.write_to_ppu_addr(0xff);
-
-        ppu.read_data(); //load_into_buffer
-        assert_eq!(ppu.read_data(), 0x66);
-        assert_eq!(ppu.read_data(), 0x77);
-    }
-
-    #[test]
-    fn test_ppu_vram_reads_step_32() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ctrl(0b100);
-        ppu.vram[0x01ff] = 0x66;
-        ppu.vram[0x01ff + 32] = 0x77;
-        ppu.vram[0x01ff + 64] = 0x88;
-
-        ppu.write_to_ppu_addr(0x21);
-        ppu.write_to_ppu_addr(0xff);
-
-        ppu.read_data(); //load_into_buffer
-        assert_eq!(ppu.read_data(), 0x66);
-        assert_eq!(ppu.read_data(), 0x77);
-        assert_eq!(ppu.read_data(), 0x88);
-    }
-
-    // Horizontal: https://www.nesdev.org/wiki/Mirroring
-    //   [0x2000 A ] [0x2400 a ]
-    //   [0x2800 B ] [0x2C00 b ]
-    #[test]
-    fn test_vram_horizontal_mirror() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ppu_addr(0x24);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.write_to_data(0x66); //write to a
-
-        ppu.write_to_ppu_addr(0x28);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.write_to_data(0x77); //write to B
-
-        ppu.write_to_ppu_addr(0x20);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load into buffer
-        assert_eq!(ppu.read_data(), 0x66); //read from A
-
-        ppu.write_to_ppu_addr(0x2C);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load into buffer
-        assert_eq!(ppu.read_data(), 0x77); //read from b
-    }
-
-    // Vertical: https://www.nesdev.org/wiki/Mirroring
-    //   [0x2000 A ] [0x2400 B ]
-    //   [0x2800 a ] [0x2C00 b ]
-    #[test]
-    fn test_vram_vertical_mirror() {
-        let mut ppu = NesPPU::with_mirroring(Mirroring::Vertical);
-
-        ppu.write_to_ppu_addr(0x20);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.write_to_data(0x66); //write to A
-
-        ppu.write_to_ppu_addr(0x2C);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.write_to_data(0x77); //write to b
-
-        ppu.write_to_ppu_addr(0x28);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load into buffer
-        assert_eq!(ppu.read_data(), 0x66); //read from a
-
-        ppu.write_to_ppu_addr(0x24);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load into buffer
-        assert_eq!(ppu.read_data(), 0x77); //read from B
-    }
-
-    #[test]
-    fn test_read_status_resets_latch() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.vram[0x0305] = 0x66;
-
-        ppu.write_to_ppu_addr(0x21);
-        ppu.write_to_ppu_addr(0x23);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load_into_buffer
-        assert_ne!(ppu.read_data(), 0x66);
-
-        ppu.read_status();
-
-        ppu.write_to_ppu_addr(0x23);
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load_into_buffer
-        assert_eq!(ppu.read_data(), 0x66);
-    }
-
-    #[test]
-    fn test_ppu_vram_mirroring() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ctrl(0);
-        ppu.vram[0x0305] = 0x66;
-
-        ppu.write_to_ppu_addr(0x63); //0x6305 -> 0x2305
-        ppu.write_to_ppu_addr(0x05);
-
-        ppu.read_data(); //load into_buffer
-        assert_eq!(ppu.read_data(), 0x66);
-        // assert_eq!(ppu.addr.read(), 0x0306)
-    }
-
-    #[test]
-    fn test_read_status_resets_vblank() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.status.set_vblank_status(true);
-
-        let status = ppu.read_status();
-
-        assert_eq!(status >> 7, 1);
-        assert_eq!(ppu.status.snapshot() >> 7, 0);
-    }
-
-    #[test]
-    fn test_oam_read_write() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_oam_addr(0x10);
-        ppu.write_to_oam_data(0x66);
-        ppu.write_to_oam_data(0x77);
-
-        ppu.write_to_oam_addr(0x10);
-        assert_eq!(ppu.read_oam_data(), 0x66);
-
-        ppu.write_to_oam_addr(0x11);
-        assert_eq!(ppu.read_oam_data(), 0x77);
-    }
-
-    #[test]
-    fn test_oam_dma() {
-        let mut ppu = NesPPU::new_empty_rom();
-
-        let mut data = [0x66; 256];
-        data[0] = 0x77;
-        data[255] = 0x88;
-
-        ppu.write_to_oam_addr(0x10);
-        ppu.write_oam_dma(&data);
-
-        ppu.write_to_oam_addr(0xf); //wrap around
-        assert_eq!(ppu.read_oam_data(), 0x88);
-
-        ppu.write_to_oam_addr(0x10);
-        assert_eq!(ppu.read_oam_data(), 0x77);
-
-        ppu.write_to_oam_addr(0x11);
-        assert_eq!(ppu.read_oam_data(), 0x66);
-    }
-
-    #[test]
-    fn test_four_screen_uses_4k_vram() {
-        let mut ppu = NesPPU::with_mirroring(Mirroring::FourScreen);
-        ppu.write_to_ppu_addr(0x2C);
-        ppu.write_to_ppu_addr(0x05);
-        ppu.write_to_data(0x66);
-        assert_eq!(ppu.vram[0x0C05], 0x66);
-    }
-
-    #[test]
-    fn test_single_screen_mirroring() {
-        let ppu = NesPPU::with_mirroring(Mirroring::SingleScreenUpper);
-        for nt in [0x2000u16, 0x2400, 0x2800, 0x2C00] {
-            assert_eq!(ppu.mirror_vram_addr(nt + 5), 0x405);
-        }
-    }
-
-    #[test]
-    fn test_chr_ram_write_and_read() {
-        use crate::mapper::Nrom;
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        let cart = Nrom::from_parts(vec![0; 0x4000], vec![], Mirroring::Vertical);
-        let mut ppu = NesPPU::new(Rc::new(RefCell::new(cart)));
-        ppu.write_to_ppu_addr(0x01);
-        ppu.write_to_ppu_addr(0x23);
-        ppu.write_to_data(0x5A);
-        assert_eq!(ppu.chr_read(0x0123), 0x5A);
-    }
-
-    #[test]
-    fn test_sprite_row_addr() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ctrl(0b0000_1000); // 8x8 sprites from $1000
-        assert_eq!(ppu.sprite_row_addr(0x02, 3), 0x1000 + 0x20 + 3);
-
-        ppu.write_to_ctrl(0b0010_0000); // 8x16; table comes from the tile index
-        assert_eq!(ppu.sprite_row_addr(0x03, 0), 0x1000 + 0x20);
-        assert_eq!(ppu.sprite_row_addr(0x03, 9), 0x1000 + 0x30 + 1);
-        assert_eq!(ppu.sprite_row_addr(0x04, 15), 0x0000 + 0x50 + 7);
-    }
-
-    #[test]
-    fn test_palette_stores_only_6_bits() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ppu_addr(0x3F);
-        ppu.write_to_ppu_addr(0x11);
-        ppu.write_to_data(0xF0);
-        assert_eq!(ppu.palette_table[0x11], 0x30);
-    }
-
-    #[test]
-    fn test_palette_mirror_write_is_masked() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ppu_addr(0x3F);
-        ppu.write_to_ppu_addr(0x10); // mirror of $3F00
-        ppu.write_to_data(0xFF);
-        assert_eq!(ppu.palette_table[0x00], 0x3F);
-    }
-
-    #[test]
-    fn test_palette_mirrors() {
-        let mut ppu = NesPPU::new_empty_rom();
-        ppu.write_to_ppu_addr(0x3F);
-        ppu.write_to_ppu_addr(0x30); // mirror of $3F10, which mirrors $3F00
-        ppu.write_to_data(0x21);
-        assert_eq!(ppu.palette_table[0x00], 0x21);
-
-        ppu.write_to_ppu_addr(0x3F);
-        ppu.write_to_ppu_addr(0x10);
-        assert_eq!(ppu.read_data(), 0x21);
-    }
-
-    fn counting_ppu() -> (
-        NesPPU,
-        std::rc::Rc<std::cell::RefCell<crate::mapper::test_util::ScanlineCounter>>,
-    ) {
-        use crate::mapper::test_util::ScanlineCounter;
-        let cart = std::rc::Rc::new(std::cell::RefCell::new(ScanlineCounter::new(
-            vec![0; 0x8000],
-            None,
-        )));
-        (NesPPU::new(cart.clone()), cart)
-    }
-
-    fn run_frame(ppu: &mut NesPPU) {
-        while !ppu.tick(3) {}
-    }
-
-    #[test]
-    fn test_mapper_clocked_once_per_rendered_line() {
-        let (mut ppu, cart) = counting_ppu();
-        ppu.write_to_mask(0b0000_1000); // show background
-        run_frame(&mut ppu);
-        // 240 visible lines + the pre-render line
-        assert_eq!(cart.borrow().scanlines, 241);
-    }
-
-    #[test]
-    fn test_mapper_not_clocked_when_rendering_off() {
-        let (mut ppu, cart) = counting_ppu();
-        run_frame(&mut ppu);
-        assert_eq!(cart.borrow().scanlines, 0);
-    }
-
-    #[test]
-    fn test_mid_frame_change_shows_on_later_lines() {
-        use crate::render::palette::SYSTEM_PALETTE;
-        // blank CHR, so every background pixel is the backdrop colour
-        let (mut ppu, _cart) = counting_ppu();
-        ppu.palette_table[0] = 0x0F;
-        while ppu.scanlines < 100 {
-            ppu.tick(3);
-        }
-        ppu.palette_table[0] = 0x16; // change the backdrop mid-frame
-        run_frame(&mut ppu);
-
-        let pixel = |y: usize| {
-            let i = y * 256 * 3;
-            (
-                ppu.frame.data[i],
-                ppu.frame.data[i + 1],
-                ppu.frame.data[i + 2],
-            )
-        };
-        assert_eq!(pixel(50), SYSTEM_PALETTE[0x0F]);
-        assert_eq!(pixel(150), SYSTEM_PALETTE[0x16]);
-    }
-
-    /// PPU dots from the start of a frame to the end of it, and to vblank.
-    fn measure_frame(region: Region, rendering: bool) -> (usize, usize) {
-        let (mut ppu, _cart) = counting_ppu();
-        ppu.set_region(region);
-        if rendering {
-            ppu.write_to_mask(0b0000_1000);
-        }
-        // start exactly on a frame boundary, with no leftover dots
-        while !ppu.tick(1) {}
-        let (mut dots, mut vblank_at) = (0, 0);
-        loop {
-            dots += 1;
-            let done = ppu.tick(1);
-            if vblank_at == 0 && ppu.status.is_in_vblank() {
-                vblank_at = dots;
-            }
-            if done {
-                return (dots, vblank_at);
-            }
-        }
-    }
-
-    #[test]
-    fn test_frame_lengths_by_region() {
-        assert_eq!(measure_frame(Region::Ntsc, false).0, 341 * 262);
-        assert_eq!(measure_frame(Region::Pal, false).0, 341 * 312);
-        assert_eq!(measure_frame(Region::Dendy, false).0, 341 * 312);
-        // no odd-frame skip outside NTSC, even with rendering on
-        assert_eq!(measure_frame(Region::Pal, true).0, 341 * 312);
-    }
-
-    #[test]
-    fn test_ntsc_odd_frames_skip_a_dot() {
-        let (mut ppu, _cart) = counting_ppu();
-        ppu.write_to_mask(0b0000_1000);
-        let mut lengths = vec![];
-        for _ in 0..4 {
-            let mut dots = 0;
-            loop {
-                dots += 1;
-                if ppu.tick(1) {
-                    break;
-                }
-            }
-            lengths.push(dots);
-        }
-        lengths.sort();
-        assert_eq!(lengths, vec![341 * 262 - 1, 341 * 262 - 1, 341 * 262, 341 * 262]);
-    }
-
-    #[test]
-    fn test_vblank_start_by_region() {
-        // vblank starts at the end of line 240 (NTSC/PAL) or 290 (Dendy)
-        assert_eq!(measure_frame(Region::Ntsc, false).1, 341 * 241);
-        assert_eq!(measure_frame(Region::Pal, false).1, 341 * 241);
-        assert_eq!(measure_frame(Region::Dendy, false).1, 341 * 291);
-    }
-
-    #[test]
-    fn test_mapper_clocked_on_pal_prerender_line() {
-        let (mut ppu, cart) = counting_ppu();
-        ppu.set_region(Region::Pal);
-        ppu.write_to_mask(0b0000_1000);
-        run_frame(&mut ppu);
-        assert_eq!(cart.borrow().scanlines, 241);
-    }
-}
+mod tests;

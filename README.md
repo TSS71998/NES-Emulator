@@ -6,9 +6,9 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ## Features
 
-- **CPU (6502)**: all official opcodes plus the common unofficial ones. Cycle counts match the `nestest` reference log for every instruction, including page-crossing and branch penalties.
-- **PPU**: background, 8×8 and 8×16 sprites, CHR-ROM and CHR-RAM, sprite priority, left-column clipping, sprite-0 hit, the shared `$2005`/`$2006` write latch, and the odd-frame dot skip. The picture is drawn one scanline at a time, so mid-frame changes to scroll, CHR banks, palettes or PPUMASK show up where they happen.
-- **Mapper IRQs**: cartridges get a call for every rendered scanline and can raise the CPU's IRQ line, which is what MMC3's scanline counter needs.
+- **CPU (6502)**: all official opcodes plus the common unofficial ones, passing blargg's `instr_test-v5` official-opcode tests. Cycle counts match the `nestest` reference log, including page-crossing and branch penalties. Every memory access takes its own cycle, and the PPU and APU run up to that point first, so a register read or write lands on the exact PPU dot it would on hardware. NMI and IRQ are polled on an instruction's second-to-last cycle, like the real 6502 (so an IRQ waiting on `CLI` runs after the next instruction).
+- **PPU**: dot-accurate. Each of the 341 dots per line does what the real PPU does on it: background tile fetches every 8 dots into shift registers, sprite evaluation and pattern fetches for the next line on dots 257–320, and one pixel out per dot. Scrolling uses the real internal registers (loopy `v`, `t`, `x` and `w`), so mid-line changes to scroll, CHR banks, palettes or PPUMASK show up on the dot they happen. Also: 8×8 and 8×16 sprites, 8 sprites per line with the overflow flag (including its hardware bug), sprite priority, left-column clipping, sprite-0 hit on the exact pixel, greyscale, and vblank/NMI timing down to the dot (including the `$2002` read race and the odd-frame dot skip). Passes all 10 of blargg's `ppu_vbl_nmi` tests and all 11 `sprite_hit_tests`.
+- **Mapper IRQs**: cartridges see every address the PPU puts on its bus, with the dot it happened on, and can raise the CPU's IRQ line. MMC3 counts rising edges of address line A12 with the chip's filter for short dips, exactly as the hardware does.
 - **APU**: both pulse channels, triangle, noise and DMC, the frame sequencer (envelopes, sweeps, length counters), the nonlinear mixer and the NES's output filters.
 - **Regions**: NTSC, PAL and Dendy, with clocks derived exactly from each console's master crystal. The CPU stalls for OAM DMA (513–514 cycles) and DMC sample fetches like the real hardware.
 
@@ -22,18 +22,19 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
   | Frame rate | 60.0988 | 50.0070 | 50.0070 |
 - **Audio sync**: dynamic rate control keeps about 25 ms of audio buffered. This avoids crackles from the sound card's clock drifting against the system clock.
 - **ROM loading**: iNES, NES 2.0 and archaic iNES headers. This includes 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
-- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM). Together these cover most of the NES library. MMC3 passes blargg's `mmc3_test_2` tests 1, 2, 3 and 5 (and 6 for boards marked as MMC3A in a NES 2.0 header).
+- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM). Together these cover most of the NES library. MMC3 passes blargg's `mmc3_test_2` tests 1–5, including `4-scanline_timing` (IRQ timing to the PPU dot), and 6 for boards marked as MMC3A in a NES 2.0 header.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
 - **Input**: keyboard as controller 1. The bus emulates both controller ports.
 
 ## Limitations
 
-- **MMC3 IRQ timing is per scanline.** The counter is clocked at the end of each rendered line rather than at the exact PPU dot, so blargg's `4-scanline_timing` test fails, and games that set both pattern tables to the same half still get one clock per line. Raster effects land on the right line in practice. The emulator exits with a message for unsupported mappers.
-- **Scanline-accurate, not dot-accurate.** Each line is drawn from the PPU's state at the end of that line, so a change made partway across a line takes effect on the next one. No sprite-per-line limit (no flicker), and no sprite overflow flag.
+- **Unsupported mappers.** The emulator exits with a message for mappers other than 0, 1, 2, 3, 4 and 7.
+- **Sprite evaluation timing.** The 8 sprites for the next line are found all at once on dot 257, not one by one over dots 65–256. So the overflow flag is set a little late (blargg's `sprite_overflow_tests` pass 4 of 5; `3.Timing` fails), and OAM writes during rendering don't corrupt OAM as they would on hardware.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **PAL colours.** PAL's swapped red/green emphasis bits and its slightly different palette aren't modelled (colour emphasis isn't emulated in any region).
 - **Not implemented:** keyboard mapping for controller 2, and the APU's frame and DMC interrupts. (Mapper IRQs work.)
-- **Instruction-stepped CPU.** The PPU and APU catch up after each instruction rather than on every memory access, so register reads and writes can land a few cycles early.
+- **CPU dummy accesses.** The 6502's dummy reads and writes (e.g. the extra read of an indexed address, or the double write of a read-modify-write instruction) take their cycles but don't touch the bus, so tricks that read `$2007` or `$2002` that way don't work. DMC sample fetches stall the CPU after the current instruction instead of mid-instruction.
+- **PPU open bus.** Reading a write-only PPU register returns the CPU's open bus, not the PPU's decaying data latch.
 
 ## Building and running
 
@@ -74,7 +75,7 @@ Build with `--release`. An unoptimised debug build may not keep up with real tim
 cargo test
 ```
 
-The tests cover CPU instructions, PPU registers and VRAM mirroring, APU channels and sample generation, and iNES / NES 2.0 header parsing, and bank switching for each mapper.
+The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, sprites and frame timing, APU channels and sample generation, and iNES / NES 2.0 header parsing, and bank switching for each mapper.
 
 ## Project layout
 
@@ -82,9 +83,9 @@ The tests cover CPU instructions, PPU registers and VRAM mirroring, APU channels
 |------|---------|
 | `src/main.rs` | SDL window, input, and the main loop |
 | `src/cpu.rs`, `src/opcodes.rs` | 6502 CPU and opcode table |
-| `src/bus.rs` | Memory map; steps the PPU and APU once per CPU cycle and handles DMA stalls |
-| `src/ppu/` | Picture processing unit and its registers |
-| `src/render/` | Draws each scanline from PPU state into the 256×240 frame |
+| `src/bus.rs` | Memory map; runs the PPU and APU around every CPU memory access, samples interrupts and handles DMA stalls |
+| `src/ppu/` | Picture processing unit: registers and frame timing (`mod.rs`), the per-dot fetch and pixel pipeline (`pipeline.rs`) |
+| `src/render/` | The 256×240 frame buffer and the NES palette |
 | `src/apu.rs` | Audio processing unit: channels, frame sequencer, mixer and resampling |
 | `src/audio.rs` | SDL audio output with dynamic rate control |
 | `src/frame_limiter.rs` | Keeps the emulator at 60.0988 fps when vsync isn't used |

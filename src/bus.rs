@@ -49,7 +49,26 @@ pub struct Bus<'call> {
 
     cycles: usize,
     region: Region,
-    ppu_clock_remainder: u32,
+    
+    // Master clock ticks (see Region) since power-on, and how far the PPU
+    // has been run. Each CPU cycle is split around its memory access, so the
+    // PPU has run to the right dot when a register is read or written.
+    master_clock: u64,
+    ppu_clock: u64,
+    /// CPU cycles used so far by the current instruction (see `cpu_read`).
+    instruction_cycles: u8,
+
+    // Interrupt lines as the CPU sees them. The CPU samples the NMI line
+    // every cycle and latches a rising edge; it acts on interrupts sampled
+    // at the end of an instruction's second-to-last cycle.
+    nmi_line: bool,
+    need_nmi: bool,
+    prev_need_nmi: bool,
+    run_irq: bool,
+    prev_run_irq: bool,
+    /// The CPU's I flag, which masks IRQs (see CPU::sync_irq_mask)
+    irq_mask: bool,
+
     gameloop_callback: Box<dyn FnMut(&NesPPU, &mut [Joypad; 2]) + 'call>,
     audio_callback: Option<Box<dyn FnMut(&[f32]) -> f64 + 'call>>,
     joypads: [Joypad; 2],
@@ -69,8 +88,16 @@ impl<'a> Bus<'a> {
             oam_dma_pending: false,
             open_bus: 0,
             cycles: 0,
+            master_clock: 0,
+            ppu_clock: 0,
+            instruction_cycles: 0,
+            nmi_line: false,
+            need_nmi: false,
+            prev_need_nmi: false,
+            run_irq: false,
+            prev_run_irq: false,
+            irq_mask: true,
             region: Region::Ntsc,
-            ppu_clock_remainder: 0,
             gameloop_callback: Box::from(gameloop_callback),
             audio_callback: None,
             joypads: [Joypad::new(), Joypad::new()],
@@ -89,7 +116,6 @@ impl<'a> Bus<'a> {
         self.region = region;
         self.ppu.set_region(region);
         self.apu.set_region(region);
-        self.ppu_clock_remainder = 0;
     }
 
     pub fn region(&self) -> Region {
@@ -106,9 +132,42 @@ impl<'a> Bus<'a> {
 
     pub fn tick(&mut self, cycles: u8) {
         for _ in 0..cycles {
-            self.step_cycle();
+            self.idle_cycle();
         }
+        self.run_dma();
+    }
 
+    pub fn cpu_read(&mut self, addr: u16) -> u8 {
+        self.start_cycle(true);
+        let value = self.mem_read(addr);
+        self.end_cycle(true);
+        value
+    }
+
+    pub fn cpu_write(&mut self, addr: u16, data: u8) {
+        self.start_cycle(true);
+        self.mem_write(addr, data);
+        self.end_cycle(true);
+    }
+
+    pub fn idle_cycle(&mut self) {
+        self.start_cycle(true);
+        self.end_cycle(true);
+    }
+
+    pub fn instruction_cycles(&self) -> u8 {
+        self.instruction_cycles
+    }
+
+    pub fn finish_instruction(&mut self, cycles: u8) {
+        while self.instruction_cycles < cycles {
+            self.idle_cycle();
+        }
+        self.instruction_cycles = 0;
+        self.run_dma();
+    }
+
+    fn run_dma(&mut self) {
         if self.oam_dma_pending {
             self.oam_dma_pending = false;
             self.stall_cycles += 513 + self.cycles % 2;
@@ -116,40 +175,89 @@ impl<'a> Bus<'a> {
 
         while self.stall_cycles > 0 {
             self.stall_cycles -= 1;
-            self.step_cycle();
+            self.start_cycle(true);
+            self.end_cycle(true);
+            self.instruction_cycles = 0;
         }
     }
 
-    fn step_cycle(&mut self) {
-        self.cycles += 1;
-        self.apu.tick();
+    /// Master clock ticks from the start of a CPU cycle to its access. Reads
+    /// land a little before the middle of the cycle and writes a little
+    /// after (on NTSC 5 and 7 of 12 ticks), as in Mesen.
+    fn access_point(&self, read: bool) -> u64 {
+        let half = self.region.cpu_divider() as u64 / 2;
+        if read { half - 1 } else { half + 1 }
+    }
 
+    fn start_cycle(&mut self, read: bool) {
+        self.instruction_cycles += 1;
+        self.cycles += 1;
+        self.master_clock += self.access_point(read);
+        self.run_ppu();
+
+        self.apu.tick();
         if let Some(addr) = self.apu.dmc_fetch_addr() {
             let byte = self.cartridge_read(addr);
             self.apu.dmc_provide_byte(byte);
             self.stall_cycles += 4;
         }
+    }
 
-        self.ppu_clock_remainder += self.region.cpu_divider();
-        let dots = self.ppu_clock_remainder / self.region.ppu_divider();
-        self.ppu_clock_remainder %= self.region.ppu_divider();
-        let new_frame = self.ppu.tick(dots as u8);
+    fn end_cycle(&mut self, read: bool) {
+        self.master_clock += self.region.cpu_divider() as u64 - self.access_point(read);
+        self.run_ppu();
 
-        if new_frame {
-            if let Some(callback) = self.audio_callback.as_mut() {
-                let samples = self.apu.take_samples();
-                let rate_adjust = callback(&samples);
-                self.apu.set_rate_adjust(rate_adjust);
+        // NMI is edge-triggered: the CPU latches the line going high. What
+        // it acts on is the state at the end of the previous cycle.
+        self.prev_need_nmi = self.need_nmi;
+        let nmi_line = self.ppu.nmi_line();
+        if nmi_line && !self.nmi_line {
+            self.need_nmi = true;
+        }
+        self.nmi_line = nmi_line;
+
+        self.prev_run_irq = self.run_irq;
+        self.run_irq = !self.irq_mask && self.irq_line();
+    }
+
+    fn run_ppu(&mut self) {
+        let divider = self.region.ppu_divider() as u64;
+        while self.ppu_clock + divider <= self.master_clock {
+            self.ppu_clock += divider;
+            if self.ppu.step_dot() {
+                if let Some(callback) = self.audio_callback.as_mut() {
+                    let samples = self.apu.take_samples();
+                    let rate_adjust = callback(&samples);
+                    self.apu.set_rate_adjust(rate_adjust);
+                }
+                (self.gameloop_callback)(&self.ppu, &mut self.joypads);
             }
-            (self.gameloop_callback)(&self.ppu, &mut self.joypads);
         }
     }
 
-    pub fn poll_nmi_status(&mut self) -> bool {
-        self.ppu.poll_nmi_interrupt()
+    pub fn take_nmi(&mut self) -> bool {
+        if self.prev_need_nmi {
+            self.prev_need_nmi = false;
+            self.need_nmi = false;
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn irq_pending(&self) -> bool {
+    pub fn hijack_nmi(&mut self) -> bool {
+        std::mem::take(&mut self.need_nmi)
+    }
+
+    pub fn irq_ready(&self) -> bool {
+        self.prev_run_irq
+    }
+
+    pub fn set_irq_mask(&mut self, masked: bool) {
+        self.irq_mask = masked;
+    }
+
+    pub fn irq_line(&self) -> bool {
         self.apu.irq_pending() || self.mapper.borrow().irq_pending()
     }
 

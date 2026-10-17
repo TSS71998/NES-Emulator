@@ -18,12 +18,17 @@ const CHR_BANK: usize = 0x0400;
 ///
 /// Banking is in 8 KiB PRG units and 1 KiB CHR units (R0/R1 select 2 KiB).
 ///
-/// The IRQ counter is clocked on each rising edge of PPU address line A12.
-/// While rendering with sprites at $1000 and the background at $0000 (the
-/// usual setup), that's once per scanline, which the PPU reports through
-/// [`Mapper::scanline`]. Outside rendering the PPU reports address changes
-/// from $2006/$2007 through [`Mapper::ppu_address`], so games and test ROMs
-/// that clock the counter by hand work too
+/// The IRQ counter is clocked on each rising edge of PPU address line A12,
+/// which the PPU reports through [`Mapper::ppu_address`] with every fetch.
+/// With sprites at $1000 and the background at $0000 (the usual setup) A12
+/// rises once per scanline, at dot 262 when the first sprite pattern is fetched;
+/// with the tables the other way round it rises at dot 326. Outside rendering
+/// $2006/$2007 accesses move the address, so games and test ROMs can clock
+/// the counter by hand too.
+///
+/// The MMC3 ignores a rise unless A12 has been low for a while (it really
+/// counts M2 edges, roughly 3 CPU cycles). That filters out the brief drops
+/// to $2xxx for nametable fetches between background tiles at $1xxx.
 pub struct Mmc3 {
     prg_rom: Vec<u8>,
     prg_ram: Vec<u8>,
@@ -47,8 +52,12 @@ pub struct Mmc3 {
     /// reloaded with 0. NES 2.0 submapper 4 marks these boards.
     old_irq_behavior: bool,
 
-    a12_high: bool,
+    /// PPU cycle when A12 last went low, or None while it's high
+    a12_low_since: Option<u64>,
 }
+
+/// A12 must have been low for this many PPU dots for a rise to count.
+const A12_FILTER_DOTS: u64 = 10;
 
 impl Mmc3 {
     pub fn new(rom: Rom) -> Self {
@@ -71,7 +80,7 @@ impl Mmc3 {
             irq_enabled: false,
             irq_pending: false,
             old_irq_behavior,
-            a12_high: false,
+            a12_low_since: Some(0),
         }
     }
 
@@ -200,18 +209,17 @@ impl Mapper for Mmc3 {
         self.mirroring
     }
 
-    fn scanline(&mut self) {
-        self.clock_irq_counter();
-        // the line ends with background fetches from $0xxx, so A12 is low again
-        self.a12_high = false;
-    }
-
-    fn ppu_address(&mut self, addr: u16) {
-        let a12 = addr & 0x1000 != 0;
-        if a12 && !self.a12_high {
-            self.clock_irq_counter();
+    fn ppu_address(&mut self, addr: u16, ppu_cycle: u64) {
+        if addr & 0x1000 != 0 {
+            if let Some(low_since) = self.a12_low_since {
+                if ppu_cycle.wrapping_sub(low_since) >= A12_FILTER_DOTS {
+                    self.clock_irq_counter();
+                }
+            }
+            self.a12_low_since = None;
+        } else if self.a12_low_since.is_none() {
+            self.a12_low_since = Some(ppu_cycle);
         }
-        self.a12_high = a12;
     }
 
     fn irq_pending(&self) -> bool {
@@ -236,6 +244,15 @@ mod test {
     /// 16 x 16 KiB PRG = 32 x 8 KiB banks; 4 x 8 KiB CHR = 32 x 1 KiB banks.
     fn mmc3() -> Mmc3 {
         Mmc3::new(banked_rom(4, 16, 4, true))
+    }
+
+    /// What the PPU does on a rendered line with sprites at $1000: background
+    /// fetches from $0xxx, then sprite fetches from $1xxx at dot 262.
+    fn scanline(m: &mut Mmc3, clock: &mut u64) {
+        m.ppu_address(0x0FF0, *clock + 5);
+        m.ppu_address(0x2000, *clock + 257);
+        m.ppu_address(0x1FF0, *clock + 262);
+        *clock += 341;
     }
 
     fn set_register(mmc3: &mut Mmc3, select: u8, value: u8) {
@@ -310,34 +327,36 @@ mod test {
     #[test]
     fn test_irq_after_latch_plus_one_scanlines() {
         let mut m = mmc3();
+        let mut t = 0;
         m.cpu_write(0xC000, 3); // latch
         m.cpu_write(0xC001, 0); // reload on next clock
         m.cpu_write(0xE001, 0); // enable
-        m.scanline(); // reload to 3
-        m.scanline(); // 2
-        m.scanline(); // 1
+        scanline(&mut m, &mut t); // reload to 3
+        scanline(&mut m, &mut t); // 2
+        scanline(&mut m, &mut t); // 1
         assert!(!m.irq_pending());
-        m.scanline(); // 0 -> IRQ
+        scanline(&mut m, &mut t); // 0 -> IRQ
         assert!(m.irq_pending());
 
         m.cpu_write(0xE000, 0); // acknowledge (and disable)
         assert!(!m.irq_pending());
         m.cpu_write(0xE001, 0);
-        m.scanline(); // reload to 3, counting continues
+        scanline(&mut m, &mut t); // reload to 3, counting continues
         assert!(!m.irq_pending());
     }
 
     #[test]
     fn test_counter_runs_while_irq_disabled() {
         let mut m = mmc3();
+        let mut t = 0;
         m.cpu_write(0xC000, 1);
         m.cpu_write(0xC001, 0);
-        m.scanline(); // 1
-        m.scanline(); // 0, but disabled: no IRQ
+        scanline(&mut m, &mut t); // 1
+        scanline(&mut m, &mut t); // 0, but disabled: no IRQ
         assert!(!m.irq_pending());
         m.cpu_write(0xE001, 0);
-        m.scanline(); // reload 1
-        m.scanline(); // 0 -> IRQ
+        scanline(&mut m, &mut t); // reload 1
+        scanline(&mut m, &mut t); // 0 -> IRQ
         assert!(m.irq_pending());
     }
 
@@ -346,15 +365,39 @@ mod test {
         let mut m = mmc3();
         m.cpu_write(0xC000, 0); // latch 0: every clock reloads 0 and raises IRQ
         m.cpu_write(0xE001, 0);
-        m.ppu_address(0x0FFF);
-        m.ppu_address(0x0000);
+        m.ppu_address(0x0FFF, 100);
+        m.ppu_address(0x0000, 110);
         assert!(!m.irq_pending(), "A12 never went high");
-        m.ppu_address(0x1000);
+        m.ppu_address(0x1000, 120);
         assert!(m.irq_pending(), "rising edge");
         m.cpu_write(0xE000, 0);
         m.cpu_write(0xE001, 0);
-        m.ppu_address(0x1FFF);
+        m.ppu_address(0x1FFF, 130);
         assert!(!m.irq_pending(), "still high: no new edge");
+    }
+
+    #[test]
+    fn test_short_a12_drops_are_filtered() {
+        let mut m = mmc3();
+        m.cpu_write(0xC000, 0);
+        m.cpu_write(0xE001, 0);
+        m.ppu_address(0x1000, 100); // first rise after a long low: counts
+        m.cpu_write(0xE000, 0);
+        m.cpu_write(0xE001, 0);
+        // background tiles at $1xxx: nametable fetches at $2xxx drop A12
+        // for only a few dots between pattern fetches
+        for tile in 0..32 {
+            let dot = 200 + tile * 8;
+            m.ppu_address(0x2000, dot);
+            m.ppu_address(0x23C0, dot + 2);
+            m.ppu_address(0x1000, dot + 4);
+            m.ppu_address(0x1008, dot + 6);
+        }
+        assert!(!m.irq_pending());
+        // sprites at $0xxx keep it low for 64 dots, so the next rise counts
+        m.ppu_address(0x0FF0, 500);
+        m.ppu_address(0x1000, 564);
+        assert!(m.irq_pending());
     }
 
     #[test]
@@ -362,13 +405,14 @@ mod test {
         let mut rom = banked_rom(4, 16, 4, false);
         rom.submapper = 4; // MMC3A
         let mut m = Mmc3::new(rom);
+        let mut t = 0;
         m.cpu_write(0xC000, 0);
         m.cpu_write(0xE001, 0);
         m.irq_counter = 0;
-        m.scanline(); // counter was already 0: reloads 0, no IRQ on MMC3A
+        scanline(&mut m, &mut t); // counter was already 0: reloads 0, no IRQ on MMC3A
         assert!(!m.irq_pending());
         m.cpu_write(0xC001, 0); // explicit reload
-        m.scanline();
+        scanline(&mut m, &mut t);
         assert!(m.irq_pending());
     }
 

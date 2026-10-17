@@ -35,17 +35,14 @@ pub trait Mapper {
 
     fn mirroring(&self) -> Mirroring;
 
-    /// Called once per scanline while rendering is enabled: after each of
-    /// the 240 visible lines and the pre-render line, at the point where the
-    /// PPU fetches sprite patterns (about dot 260). This is when MMC3's IRQ
-    /// counter is clocked, by the PPU's A12 address line going high.
-    fn scanline(&mut self) {}
-
-    /// Called with the PPU's VRAM address whenever it changes while
-    /// rendering is off: after the second $2006 write and after each $2007
-    /// access. On real hardware the cartridge sees this address on the PPU
-    /// bus, so MMC3 can be clocked by toggling bit 12 (A12) through $2006.
-    fn ppu_address(&mut self, _addr: u16) {}
+    /// Called with every address the PPU puts on its address bus: each
+    /// nametable, attribute and pattern fetch while rendering (several per
+    /// 8 dots), and v after $2006/$2007 accesses while rendering is off.
+    /// `ppu_cycle` counts PPU dots since power-on, so a mapper can time how
+    /// long an address line stayed low. MMC3 counts scanlines by watching
+    /// A12 (bit 12) rise as the PPU switches from one pattern table to the
+    /// other, e.g. from background tiles at $0xxx to sprites at $1xxx.
+    fn ppu_address(&mut self, _addr: u16, _ppu_cycle: u64) {}
 
     /// Level of the cartridge's IRQ line. The CPU takes the interrupt when
     /// this is true and its I flag is clear, so a mapper keeps returning true
@@ -189,6 +186,10 @@ pub(crate) mod test_util {
         pub scanlines: usize,
         pub irq_every: Option<usize>,
         pub irq: bool,
+        a12_high: bool,
+        a12_low_since: u64,
+        /// (ppu_cycle / 341, ppu_cycle % 341) of each A12 rise
+        pub rises_at: Vec<(u64, u64)>,
     }
 
     impl ScanlineCounter {
@@ -199,6 +200,9 @@ pub(crate) mod test_util {
                 scanlines: 0,
                 irq_every,
                 irq: false,
+                a12_high: false,
+                a12_low_since: 0,
+                rises_at: vec![],
             }
         }
     }
@@ -226,13 +230,23 @@ pub(crate) mod test_util {
             Mirroring::Vertical
         }
 
-        fn scanline(&mut self) {
-            self.scanlines += 1;
-            if let Some(n) = self.irq_every {
-                if self.scanlines % n == 0 {
-                    self.irq = true;
+        /// Counts rising edges of A12 after it was low for 10+ dots, like
+        /// MMC3 (the PPU drops A12 briefly between sprite fetches).
+        fn ppu_address(&mut self, addr: u16, ppu_cycle: u64) {
+            let a12 = addr & 0x1000 != 0;
+            if !a12 && self.a12_high {
+                self.a12_low_since = ppu_cycle;
+            }
+            if a12 && !self.a12_high && ppu_cycle - self.a12_low_since >= 10 {
+                self.scanlines += 1;
+                self.rises_at.push((ppu_cycle / 341, ppu_cycle % 341));
+                if let Some(n) = self.irq_every {
+                    if self.scanlines % n == 0 {
+                        self.irq = true;
+                    }
                 }
             }
+            self.a12_high = a12;
         }
 
         fn irq_pending(&self) -> bool {
