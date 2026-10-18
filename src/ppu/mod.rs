@@ -1,14 +1,10 @@
-//! The 2C02 picture processing unit, emulated one dot (PPU clock) at a time.
-//!
 //! Each scanline is 341 dots. On the 240 visible lines and the pre-render
 //! line the PPU fetches background tiles every 8 dots into shift registers,
-//! evaluates and fetches the sprites for the next line during dots 257-320,
-//! and outputs one pixel per dot during dots 1-256. Scrolling uses the real
-//! internal registers ("loopy" v, t, x and w), so mid-frame writes to
-//! $2000/$2005/$2006 take effect at the exact dot they happen on.
-//!
-//! The pipeline itself lives in `pipeline.rs`; this file has the CPU-facing
-//! registers and the frame timing (vblank, NMI, odd-frame skip).
+//! evaluates the sprites for the next line on dots 1-256 and fetches them
+//! during dots 257-320, and outputs one pixel per dot during dots 1-256.
+//! Scrolling uses the real internal registers ("loopy" v, t, x and w), so
+//! mid-frame writes to $2000/$2005/$2006 take effect at the exact dot they
+//! happen on.
 
 use crate::cartridge::Mirroring;
 use crate::mapper::SharedMapper;
@@ -455,7 +451,12 @@ impl PPU for NesPPU {
         self.oam_addr = value;
     }
 
+    /// While rendering (visible lines and the pre-render line) OAM is busy:
+    /// the write is lost and OAMADDR moves to the next sprite instead.
     fn write_to_oam_data(&mut self, value: u8) {
+        if self.is_rendering() {
+            self.oam_addr = self.oam_addr.wrapping_add(4);
+        }
         self.oam_data[self.oam_addr as usize] = oam_byte(self.oam_addr, value);
         self.oam_addr = self.oam_addr.wrapping_add(1);
     }
@@ -533,7 +534,13 @@ impl PPU for NesPPU {
         data
     }
 
+    /// While rendering, $2004 returns the byte the PPU is using for sprite
+    /// evaluation or fetching: $FF on dots 1-64, then OAM and secondary
+    /// OAM bytes.
     fn read_oam_data(&self) -> u8 {
+        if self.is_rendering() {
+            return self.sprites.buffer;
+        }
         self.oam_data[self.oam_addr as usize]
     }
 }

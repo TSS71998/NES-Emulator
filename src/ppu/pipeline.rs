@@ -9,8 +9,8 @@
 //! That is where MMC3 sees A12 go high when sprites use $1000.
 
 use super::{palette_index, NesPPU};
-use crate::render::palette::SYSTEM_PALETTE;
-
+use crate::region::Region;
+use crate::render::palette::EMPHASIS_PALETTE;
 #[derive(Default)]
 pub(super) struct Background {
     next_tile: u8,
@@ -32,9 +32,22 @@ struct SpritePixel {
 }
 
 pub(super) struct Sprites {
-    /// Sprites found for the next line: (OAM index, y, tile, attributes, x)
-    found: [(u8, u8, u8, u8, u8); 8],
+    secondary: [u8; 32],
     count: usize,
+    sprite_zero_found: bool,
+    /// The byte last read from OAM or secondary OAM; $2004 returns it while
+    /// the PPU is rendering.
+    pub(super) buffer: u8,
+    /// Evaluation state: the next secondary OAM byte to write, the sprite
+    /// (n) and byte (m) OAMADDR is on, whether the sprite just read is being
+    /// copied, whether all 64 sprites have been looked at, and the 3 extra
+    /// reads after an overflow.
+    secondary_addr: u8,
+    n: u8,
+    m: u8,
+    copying: bool,
+    done: bool,
+    overflow_reads: u8,
     line: [SpritePixel; 256],
     next_line: [SpritePixel; 256]
 }
@@ -42,8 +55,16 @@ pub(super) struct Sprites {
 impl Default for Sprites {
     fn default() -> Self {
         Sprites {
-            found: [(0, 0, 0, 0, 0); 8],
+            secondary: [0xFF; 32],
             count: 0,
+            sprite_zero_found: false,
+            buffer: 0xFF,
+            secondary_addr: 0,
+            n: 0,
+            m: 0,
+            copying: false,
+            done: false,
+            overflow_reads: 0,
             line: [SpritePixel::default(); 256],
             next_line: [SpritePixel::default(); 256],
         }
@@ -69,6 +90,12 @@ impl NesPPU {
         if visible && (1..=256).contains(&dot) {
             self.output_pixel();
         }
+        if visible && (1..=256).contains(&dot) {
+            self.evaluate_sprites();
+        }
+        if dot == 321 {
+            self.sprites.buffer = self.sprites.secondary[0];
+        }
 
         match dot {
             1..=256 | 321..=336 => self.fetch_background(),
@@ -77,6 +104,9 @@ impl NesPPU {
                     self.load_shifters();
                     self.copy_horizontal();
                     self.evaluate_sprites();
+                    if !visible {
+                        self.sprites.count = 0;
+                    }
                 }
                 // OAMADDR is held at 0 while sprites are fetched
                 self.oam_addr = 0;
@@ -198,36 +228,112 @@ impl NesPPU {
         self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
     }
 
-    /// Finds the first 8 sprites in OAM that cover the next line, and sets
-    /// the overflow flag if there are more, including the hardware's bug
-    /// (after 8 sprites it checks the wrong byte of each following entry).
+    /// One dot of sprite evaluation (dots 1-256 of a visible line), which
+    /// finds the first 8 sprites in OAM that cover the next line.
+    ///
+    /// Dots 1-64 fill secondary OAM with $FF. From dot 65 the PPU reads
+    /// OAM[OAMADDR] on odd dots, and on even dots copies the byte into
+    /// secondary OAM and moves OAMADDR on: to the next byte while copying a
+    /// sprite that is in range, otherwise to the next sprite. It starts at
+    /// whatever OAMADDR is, so a nonzero OAMADDR skips sprites or reads Y
+    /// from the wrong byte, as on hardware.
+    ///
+    /// Once 8 sprites are found it keeps looking for a 9th to set the
+    /// overflow flag, but with the hardware bug: after each sprite not in
+    /// range it moves to the next byte as well as the next sprite, so it
+    /// compares tiles, attributes or X positions against the line.
     fn evaluate_sprites(&mut self) {
-        let sprites = &mut self.sprites;
-        sprites.count = 0;
-        if self.scanline >= 240 {
-            return; // the pre-render line fetches but never shows sprites
-        }
+        let dot = self.dot;
         let height = self.ctrl.sprite_size() as u16;
         let line = self.scanline;
-        let in_range = |y: u8| line >= y as u16 && line < y as u16 + height;
-
-        let mut n = 0;
-        while n < 64 && sprites.count < 8 {
-            let entry = &self.oam_data[n * 4..n * 4 + 4];
-            if in_range(entry[0]) {
-                sprites.found[sprites.count] = (n as u8, entry[0], entry[1], entry[2], entry[3]);
-                sprites.count += 1;
-            }
-            n += 1;
+        let sprites = &mut self.sprites;
+        
+        if dot <= 64 {
+            sprites.buffer = 0xFF;
+            sprites.secondary[(dot as usize - 1) >> 1] = 0xFF;
+            return;
         }
-        let mut m = 0;
-        while n < 64 {
-            if in_range(self.oam_data[n * 4 + m]) {
-                self.status.set_sprite_overflow(true);
-                break;
+
+        if dot == 65 {
+            sprites.secondary_addr = 0;
+            sprites.n = self.oam_addr >> 2;
+            sprites.m = self.oam_addr & 3;
+            sprites.copying = false;
+            sprites.done = false;
+            sprites.overflow_reads = 0;
+            sprites.sprite_zero_found = false;
+        }
+
+        if dot & 1 == 1 {
+            sprites.buffer = self.oam_data[self.oam_addr as usize];
+            return;
+        }
+
+        let in_range = |y: u8| line >= y as u16 && line < y as u16 + height; 
+        let mut overflow = false;
+        if sprites.done {
+            sprites.n = (sprites.n + 1) & 0x3F;
+            if sprites.secondary_addr >= 0x20 {
+                sprites.buffer = sprites.secondary[(sprites.secondary_addr & 0x1F) as usize];
             }
-            n += 1;
-            m = (m + 1) & 3;
+        } else {
+            if !sprites.copying && in_range(sprites.buffer) {
+                sprites.copying = true;
+            }
+            if sprites.secondary_addr < 0x20 {
+                sprites.secondary[sprites.secondary_addr as usize] = sprites.buffer;
+                if sprites.copying {
+                    if sprites.n == 0 {
+                        sprites.sprite_zero_found = true;
+                    }
+                    sprites.m += 1;
+                    sprites.secondary_addr += 1;
+                    if sprites.secondary_addr & 3 == 0 {
+                        // all 4 bytes copied
+                        sprites.copying = false;
+                        sprites.m = 0;
+                        sprites.n = (sprites.n + 1) & 0x3F;
+                        sprites.done = sprites.n == 0;
+                    }
+                } else {
+                    sprites.n = (sprites.n + 1) & 0x3F;
+                    sprites.done = sprites.n == 0;
+                }
+            } else {
+                // secondary OAM is full: writes become reads of it
+                sprites.buffer = sprites.secondary[(sprites.secondary_addr & 0x1F) as usize];
+                if sprites.copying {
+                    // a 9th sprite: set overflow, then read its other 3 bytes
+                    overflow = true;
+                    sprites.m += 1;
+                    if sprites.m == 4 {
+                        sprites.n = (sprites.n + 1) & 0x3F;
+                        sprites.m = 0;
+                    }
+                    if sprites.overflow_reads == 0 {
+                        sprites.overflow_reads = 3;
+                    } else {
+                        sprites.overflow_reads -= 1;
+                        if sprites.overflow_reads == 0 {
+                            sprites.done = true;
+                            sprites.m = 0;
+                        }
+                    }
+                } else {
+                    // the bug: n and m both move on
+                    sprites.n = (sprites.n + 1) & 0x3F;
+                    sprites.m = (sprites.m + 1) & 3;
+                    sprites.done = sprites.n == 0;
+                }
+            }
+        }
+
+        self.oam_addr = sprites.n << 2 | (sprites.m & 3);
+        if dot == 256 {
+            sprites.count = (sprites.secondary_addr >> 2) as usize;
+        }
+        if overflow {
+            self.status.set_sprite_overflow(true);
         }
     }
 
@@ -237,6 +343,7 @@ impl NesPPU {
     fn fetch_sprites(&mut self) {
         let offset = self.dot - 257;
         let slot = (offset / 8) as usize;
+        self.sprites.buffer = self.sprites.secondary[slot * 4 + (offset as usize & 7).min(3)];
         match offset & 7 {
             1 | 3 => {
                 let addr = 0x2000 | (self.v & 0x0FFF);
@@ -264,9 +371,10 @@ impl NesPPU {
             // empty slots fetch tile $FF
             return self.sprite_row_addr(0xFF, 0);
         }
-        let (_, y, tile, attr, _) = self.sprites.found[slot];
+        let sprite = &self.sprites.secondary[slot * 4..slot * 4 + 4];
+        let (y, tile, attr) = (sprite[0], sprite[1], sprite[2]);
         let height = self.ctrl.sprite_size() as u16;
-        let mut row = self.scanline - y as u16;
+        let mut row = self.scanline.wrapping_sub(y as u16) & (height - 1);
         if attr & 0x80 != 0 {
             row = height - 1 - row;
         }
@@ -280,7 +388,8 @@ impl NesPPU {
             return;
         }
         let addr = self.sprite_fetch_addr(slot);
-        let (index, _, _, attr, x) = self.sprites.found[slot];
+        let (attr, x) = (self.sprites.secondary[slot * 4 + 2], self.sprites.secondary[slot * 4 + 3]);
+        let sprite_zero = slot == 0 && self.sprites.sprite_zero_found;
         let mut low = self.chr_read(addr);
         let mut high = self.chr_read(addr + 8);
         if attr & 0x40 != 0 {
@@ -299,7 +408,7 @@ impl NesPPU {
                     value,
                     palette: attr & 0b11,
                     behind_background: attr & 0x20 != 0,
-                    sprite_zero: index == 0,
+                    sprite_zero,
                 };
             }
         }
@@ -356,9 +465,10 @@ impl NesPPU {
         self.put_pixel(x, colour);
     }
 
-    fn put_pixel(&mut self, x: usize, colour: u8) {
-        let colour = if self.mask.is_greyscale() { colour & 0x30 } else { colour };
-        let rgb = SYSTEM_PALETTE[(colour & 0x3F) as usize];
+    fn put_pixel(&mut self, x: usize, color: u8) {
+        let color = if self.mask.is_greyscale() { color & 0x30 } else { color };
+        let emphasis = self.mask.emphasise(matches!(self.region, Region::Pal | Region::Dendy));
+        let rgb = EMPHASIS_PALETTE[emphasis << 6 | (color & 0x3F) as usize];
         let i = (self.scanline as usize * 256 + x) * 3;
         self.frame.data[i] = rgb.0;
         self.frame.data[i + 1] = rgb.1;
@@ -370,6 +480,7 @@ impl NesPPU {
 mod test {
     use super::*;
     use crate::ppu::PPU;
+    use crate::render::palette::SYSTEM_PALETTE;
 
     const RED: u8 = 0x16;
     const GREEN: u8 = 0x2A;
@@ -434,6 +545,32 @@ mod test {
     }
 
     #[test]
+    fn test_colour_emphasis() {
+        let mut ppu = test_ppu();
+        ppu.vram[12 * 32 + 12] = 1; // opaque background tile at x 96-103, y 96-103
+        sprite(&mut ppu, 0, 20, 9, 0);
+        ppu.write_to_mask(0b0011_1110); // emphasise red
+        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[1 << 6 | GREEN as usize]);
+        assert_eq!(pixel(&mut ppu, 22, 10), EMPHASIS_PALETTE[1 << 6 | RED as usize]);
+        ppu.write_to_mask(0b1111_1111); // all three, greyscale on
+        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[7 << 6 | (GREEN & 0x30) as usize]);
+        // with rendering off the backdrop is tinted too
+        ppu.write_to_mask(0b1000_0000);
+        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[4 << 6 | 0x0F]);
+    }
+
+    #[test]
+    fn test_pal_swaps_red_and_green_emphasis() {
+        let mut ppu = test_ppu();
+        ppu.vram[12 * 32 + 12] = 1; // opaque background tile at x 96-103, y 96-103
+        ppu.set_region(Region::Pal);
+        ppu.write_to_mask(0b0011_1110); // bit 5: green on PAL
+        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[2 << 6 | GREEN as usize]);
+        ppu.write_to_mask(0b0101_1110); // bit 6: red on PAL
+        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[1 << 6 | GREEN as usize]);
+    }
+
+    #[test]
     fn test_lower_oam_index_wins_even_when_behind_background() {
         let mut ppu = test_ppu();
         ppu.vram[1 * 32 + 2] = 1; // opaque background tile at x 16-23, y 8-15
@@ -460,6 +597,99 @@ mod test {
             ppu.tick(1);
         }
         assert_eq!(ppu.scanline, 49);
+    }
+
+    /// Runs until the PPU has just emulated `dot` of `line`.
+    fn run_to(ppu: &mut NesPPU, line: u16, dot: u16) {
+        while (ppu.scanline, ppu.dot) != (line, dot) {
+            ppu.tick(1);
+        }
+    }
+
+    fn overflow(ppu: &NesPPU) -> bool {
+        ppu.status.snapshot() & 0x20 != 0
+    }
+
+    #[test]
+    fn test_overflow_is_set_on_the_dot_the_ninth_sprite_is_checked() {
+        let mut ppu = test_ppu();
+        for n in 0..9 {
+            sprite(&mut ppu, n, n as u8 * 10, 49, 0);
+        }
+        run_frame(&mut ppu);
+        // 8 sprites copied at 8 dots each (65-128), then the 9th sprite's Y
+        // is read on dot 129 and found in range on dot 130
+        run_to(&mut ppu, 49, 129);
+        assert!(!overflow(&ppu));
+        ppu.tick(1);
+        assert!(overflow(&ppu));
+    }
+
+    #[test]
+    fn test_overflow_bug_checks_the_wrong_byte() {
+        // after 8 sprites, a sprite not in range makes the PPU check byte 1
+        // (the tile) of the next one, then byte 2 of the one after...
+        let mut ppu = test_ppu();
+        for n in 0..8 {
+            sprite(&mut ppu, n, n as u8 * 10, 49, 0);
+        }
+        ppu.oam_data[8 * 4..8 * 4 + 4].copy_from_slice(&[200, 1, 0, 0]); // not in range
+        ppu.oam_data[9 * 4..9 * 4 + 4].copy_from_slice(&[200, 45, 0, 0]); // tile 45 "is in range"
+        run_frame(&mut ppu);
+        run_to(&mut ppu, 49, 256);
+        assert!(overflow(&ppu), "a false overflow");
+
+        // ...so a real 9th sprite there is missed
+        let mut ppu = test_ppu();
+        for n in 0..8 {
+            sprite(&mut ppu, n, n as u8 * 10, 49, 0);
+        }
+        ppu.oam_data[8 * 4..8 * 4 + 4].copy_from_slice(&[200, 1, 0, 0]);
+        ppu.oam_data[9 * 4..9 * 4 + 4].copy_from_slice(&[49, 1, 0, 90]); // in range, but tile 1 is checked
+        run_frame(&mut ppu);
+        run_to(&mut ppu, 49, 256);
+        assert!(!overflow(&ppu), "the 10th sprite is missed");
+    }
+
+    #[test]
+    fn test_evaluation_starts_at_oamaddr() {
+        let mut ppu = test_ppu();
+        sprite(&mut ppu, 0, 10, 49, 0);
+        sprite(&mut ppu, 1, 40, 49, 0);
+        run_frame(&mut ppu);
+        run_to(&mut ppu, 49, 64);
+        ppu.oam_addr = 4; // as if the CPU wrote $2003 during the line
+        run_to(&mut ppu, 51, 0);
+        let at = |x: usize| {
+            let i = (50 * 256 + x) * 3;
+            (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+        };
+        assert_eq!(at(12), colour(0x0F), "sprite 0 is skipped");
+        assert_eq!(at(42), colour(RED), "sprite 1 is found");
+    }
+
+    #[test]
+    fn test_oam_data_during_rendering() {
+        let mut ppu = test_ppu();
+        sprite(&mut ppu, 0, 10, 49, 0);
+        run_frame(&mut ppu);
+        // dots 1-64 clear secondary OAM, and $2004 reads $FF
+        run_to(&mut ppu, 49, 30);
+        assert_eq!(ppu.read_oam_data(), 0xFF);
+        // dots 257-320 read secondary OAM: slot 0 is sprite 0 (X = 10)
+        run_to(&mut ppu, 49, 260);
+        assert_eq!(ppu.read_oam_data(), 10);
+        // a write doesn't reach OAM but moves OAMADDR to the next sprite
+        run_to(&mut ppu, 49, 330);
+        ppu.write_to_oam_data(0x77);
+        assert_eq!(ppu.oam_addr, 4);
+        assert_eq!(ppu.oam_data[0], 49);
+        // in vblank OAM is free again
+        run_to(&mut ppu, 245, 0);
+        ppu.oam_addr = 0;
+        assert_eq!(ppu.read_oam_data(), 49);
+        ppu.write_to_oam_data(0x77);
+        assert_eq!(ppu.oam_data[0], 0x77);
     }
 
     #[test]
