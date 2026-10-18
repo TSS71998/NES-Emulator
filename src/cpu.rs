@@ -40,7 +40,7 @@ pub struct CPU<'a> {
     /// CPU cycles the current instruction takes, including any page-cross or
     /// branch-taken extras discovered while running it.
     cycles: u8,
-    reset_pending: bool
+    reset_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,9 +100,13 @@ fn page_cross(addr1: u16, addr2: u16) -> bool {
 fn uncorrected_addr(mode: &AddressingMode, addr: u16, page_cross: bool) -> Option<u16> {
     match mode {
         AddressingMode::Absolute_X | AddressingMode::Absolute_Y | AddressingMode::Indirect_Y => {
-            Some(if page_cross { addr.wrapping_sub(0x100) } else { addr })
+            Some(if page_cross {
+                addr.wrapping_sub(0x100)
+            } else {
+                addr
+            })
         }
-        _ => None
+        _ => None,
     }
 }
 
@@ -217,7 +221,7 @@ impl<'a> CPU<'a> {
             status: CpuFlags::from_bits_truncate(0b100100),
             bus: bus,
             cycles: 0,
-            reset_pending: false
+            reset_pending: false,
         }
     }
 
@@ -287,7 +291,11 @@ impl<'a> CPU<'a> {
     /// A read-modify-write instruction (ASL, INC, DCP, ...): reads the value,
     /// writes it back unchanged while `op` works out the result, then writes
     /// the result on the next cycle. Games and mappers see both writes.
-    fn read_modify_write(&mut self, mode: &AddressingMode, op: impl FnOnce(&mut Self, u8) -> u8) -> u8 {
+    fn read_modify_write(
+        &mut self,
+        mode: &AddressingMode,
+        op: impl FnOnce(&mut Self, u8) -> u8,
+    ) -> u8 {
         let (addr, page_cross) = self.get_operand_address(mode);
         if let Some(dummy) = uncorrected_addr(mode, addr, page_cross) {
             self.mem_read(dummy);
@@ -300,11 +308,10 @@ impl<'a> CPU<'a> {
         new
     }
 
-
     /// The unstable stores SHA/AHX, SHX, SHY and TAS write `value & (H + 1)`,
     /// where H is the high byte of the address *before* indexing. If the
     /// index crosses a page, that same value also replaces the high byte of
-    /// the address written to. 
+    /// the address written to.
     fn unstable_store(&mut self, base: u16, index: u8, value: u8) {
         let addr = base.wrapping_add(index as u16);
         self.dummy_read((base & 0xFF00) | (addr & 0x00FF));
@@ -706,11 +713,12 @@ impl<'a> CPU<'a> {
 
         // an NMI that arrives while an IRQ or BRK is pushing takes over its
         // vector fetch (the pushed B flag still says which it was)
-        let vector_addr = if interrupt.itype != interrupt::InterruptType::NMI && self.bus.hijack_nmi() {
-            interrupt::NMI.vector_addr
-        } else {
-            interrupt.vector_addr
-        };
+        let vector_addr =
+            if interrupt.itype != interrupt::InterruptType::NMI && self.bus.hijack_nmi() {
+                interrupt::NMI.vector_addr
+            } else {
+                interrupt.vector_addr
+            };
 
         let mut flag = self.status.clone();
         flag.set(CpuFlags::BREAK, interrupt.b_flag_mask & 0b010000 != 0);
@@ -793,7 +801,8 @@ impl<'a> CPU<'a> {
     /// and PLP change it only after the poll on their own last cycle: an IRQ
     /// waiting for CLI is taken after the instruction following it.
     fn sync_irq_mask(&mut self) {
-        self.bus.set_irq_mask(self.status.contains(CpuFlags::INTERRUPT_DISABLE));
+        self.bus
+            .set_irq_mask(self.status.contains(CpuFlags::INTERRUPT_DISABLE));
     }
 
     pub fn execute_instruction(&mut self) {
@@ -1288,7 +1297,11 @@ impl<'a> CPU<'a> {
                 let zp = self.mem_read(self.program_counter);
                 let lo = self.mem_read(zp as u16) as u16;
                 let hi = self.mem_read(zp.wrapping_add(1) as u16) as u16;
-                self.unstable_store(hi << 8 | lo, self.register_y, self.register_a & self.register_x);
+                self.unstable_store(
+                    hi << 8 | lo,
+                    self.register_y,
+                    self.register_a & self.register_x,
+                );
             }
 
             /* AHX Absolute Y*/
@@ -1441,11 +1454,18 @@ mod test {
         use crate::mapper::test_util::ScanlineCounter;
         let mut prg = vec![0; 0x8000];
         let main = [
-            0xA9, 0x08, // LDA #$08
-            0x8D, 0x00, 0x20, // STA $2000 (sprites at $1000, so A12 rises once a line)
-            0x8D, 0x01, 0x20, // STA $2001 (show background)
+            0xA9,
+            0x08, // LDA #$08
+            0x8D,
+            0x00,
+            0x20, // STA $2000 (sprites at $1000, so A12 rises once a line)
+            0x8D,
+            0x01,
+            0x20,                                         // STA $2001 (show background)
             if disable_interrupts { 0x78 } else { 0x58 }, // SEI / CLI
-            0x4C, 0x09, 0x80, // JMP $8009
+            0x4C,
+            0x09,
+            0x80, // JMP $8009
         ];
         prg[..main.len()].copy_from_slice(&main);
         let handler = [
@@ -1539,7 +1559,10 @@ mod test {
         cpu.request_reset();
         cpu.step(); // reset sequence, then the NOP at $9000
         assert_eq!(cpu.program_counter, 0x9001);
-        assert_eq!((cpu.register_a, cpu.register_x, cpu.register_y), (0x42, 0x17, 0x99));
+        assert_eq!(
+            (cpu.register_a, cpu.register_x, cpu.register_y),
+            (0x42, 0x17, 0x99)
+        );
         assert_eq!(cpu.stack_pointer, sp.wrapping_sub(3), "S drops by 3");
         assert!(cpu.status.contains(CpuFlags::INTERRUPT_DISABLE));
         assert_eq!(cpu.mem_read(0x0300), 0x55, "RAM is kept");

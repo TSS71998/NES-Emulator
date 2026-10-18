@@ -1,3 +1,5 @@
+//! The 2C02 picture processing unit, emulated one dot (PPU clock) at a time.
+//!
 //! Each scanline is 341 dots. On the 240 visible lines and the pre-render
 //! line the PPU fetches background tiles every 8 dots into shift registers,
 //! evaluates the sprites for the next line on dots 1-256 and fetches them
@@ -14,8 +16,8 @@ use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
 use registers::status::StatusRegister;
 
-mod registers;
 pub mod pipeline;
+mod registers;
 
 use pipeline::{Background, Sprites};
 
@@ -53,11 +55,11 @@ pub struct NesPPU {
     odd_frame: bool,
 
     last_data_read: Option<u64>,
-    
+
     pub scanline: u16,
     pub dot: u16,
     ppu_cycle: u64,
-    
+
     /// A $2002 read one dot before vblank starts reads the flag as clear and
     /// stops it being set (and the NMI) for that frame.
     suppress_vblank: bool,
@@ -76,7 +78,7 @@ pub struct NesPPU {
     bg: Background,
     sprites: Sprites,
 
-    pub frame: Frame
+    pub frame: Frame,
 }
 
 pub trait PPU {
@@ -203,8 +205,7 @@ impl NesPPU {
     }
 
     fn is_rendering(&self) -> bool {
-        self.rendering_enabled()
-            && (self.scanline < 240 || self.scanline == self.prerender_line)
+        self.rendering_enabled() && (self.scanline < 240 || self.scanline == self.prerender_line)
     }
 
     #[inline]
@@ -281,7 +282,7 @@ impl NesPPU {
 
         // NTSC drops the last dot of the pre-render line on odd frames when
         // rendering is on, so the frame is 89341.5 dots on average
-        if line == prerender 
+        if line == prerender
             && self.dot == 339
             && self.odd_frame
             && self.skips_odd_dot
@@ -320,7 +321,10 @@ impl NesPPU {
                 value
             }
             7 => {
-                if self.last_data_read.is_some_and(|at| self.ppu_cycle - at < DATA_READ_BUSY_DOTS) {
+                if self
+                    .last_data_read
+                    .is_some_and(|at| self.ppu_cycle - at < DATA_READ_BUSY_DOTS)
+                {
                     return self.io_latch();
                 }
                 self.last_data_read = Some(self.ppu_cycle);
@@ -335,7 +339,7 @@ impl NesPPU {
                     value
                 }
             }
-            _ => self.io_latch()
+            _ => self.io_latch(),
         }
     }
 
@@ -411,7 +415,6 @@ fn mirror_nametable(mirroring: Mirroring, addr: u16) -> u16 {
     }
 }
 
-
 fn palette_index(addr: u16) -> usize {
     let index = (addr & 0x1F) as usize;
     if index & 0x13 == 0x10 {
@@ -456,6 +459,7 @@ impl PPU for NesPPU {
     fn write_to_oam_data(&mut self, value: u8) {
         if self.is_rendering() {
             self.oam_addr = self.oam_addr.wrapping_add(4);
+            return;
         }
         self.oam_data[self.oam_addr as usize] = oam_byte(self.oam_addr, value);
         self.oam_addr = self.oam_addr.wrapping_add(1);
@@ -468,9 +472,8 @@ impl PPU for NesPPU {
             self.fine_x = value & 0b111;
         } else {
             // t: FGH..AB CDE..... <- d: ABCDEFGH
-            self.t = (self.t & !0x73E0)
-                | ((value as u16 & 0b111) << 12)
-                | ((value as u16 & 0xF8) << 2);
+            self.t =
+                (self.t & !0x73E0) | ((value as u16 & 0b111) << 12) | ((value as u16 & 0xF8) << 2);
         }
         self.write_latch = !self.write_latch;
     }
@@ -486,7 +489,7 @@ impl PPU for NesPPU {
             }
             // palette RAM is 6 bits wide, so only colours $00-$3F can be stored.
             // palette_index handles the $3F10/$3F14/$3F18/$3F1C mirrors.
-            _ => self.palette_table[palette_index(addr)] = value & 0x3F
+            _ => self.palette_table[palette_index(addr)] = value & 0x3F,
         }
         self.increment_vram_addr();
     }

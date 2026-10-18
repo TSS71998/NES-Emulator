@@ -2,8 +2,8 @@ use crate::apu::APU;
 use crate::cpu::Mem;
 use crate::joypad::Joypad;
 use crate::mapper::SharedMapper;
-use crate::region::Region;
 use crate::ppu::NesPPU;
+use crate::region::Region;
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -56,7 +56,7 @@ pub struct Bus<'call> {
     ppu_divider: u64,
     read_point: u64,
     write_point: u64,
-    
+
     // Master clock ticks (see Region) since power-on, and how far the PPU
     // has been run. Each CPU cycle is split around its memory access, so the
     // PPU has run to the right dot when a register is read or written.
@@ -111,7 +111,7 @@ impl<'a> Bus<'a> {
             cpu_divider: Region::Ntsc.cpu_divider() as u64,
             ppu_divider: Region::Ntsc.ppu_divider() as u64,
             read_point: Region::Ntsc.cpu_divider() as u64 / 2 - 1,
-            write_point: Region::Ntsc.cpu_divider() as u64 / 2 + 1, 
+            write_point: Region::Ntsc.cpu_divider() as u64 / 2 + 1,
             gameloop_callback: Box::from(gameloop_callback),
             audio_callback: None,
             joypads: [Joypad::new(), Joypad::new()],
@@ -297,7 +297,11 @@ impl<'a> Bus<'a> {
     /// after (on NTSC 5 and 7 of 12 ticks), as in Mesen.
     #[inline]
     fn access_point(&self, read: bool) -> u64 {
-        if read { self.read_point } else { self.write_point }
+        if read {
+            self.read_point
+        } else {
+            self.write_point
+        }
     }
 
     fn start_cycle(&mut self, read: bool) {
@@ -438,7 +442,9 @@ impl Mem for Bus<'_> {
             0x4018..=0x401F => { /* CPU test mode registers */ }
 
             0x4020..=0xFFFF => {
-                self.mapper.borrow_mut().cpu_write_on_cycle(addr, data, self.cycles);
+                self.mapper
+                    .borrow_mut()
+                    .cpu_write_on_cycle(addr, data, self.cycles);
                 self.ppu.refresh_mirroring();
             }
         }
@@ -513,7 +519,9 @@ mod test {
         use std::rc::Rc;
         let count = Rc::new(Cell::new(0usize));
         let seen = count.clone();
-        let mut bus = Bus::new(test::test_mapper(), move |_ppu, _joypads| seen.set(seen.get() + 1));
+        let mut bus = Bus::new(test::test_mapper(), move |_ppu, _joypads| {
+            seen.set(seen.get() + 1)
+        });
         bus.set_region(region);
         bus.mem_write(0x2001, 0x08); // rendering on, so NTSC's odd-frame skip applies
         while count.get() < 1 {
@@ -534,7 +542,9 @@ mod test {
             assert!(
                 (measured - expected).abs() <= 0.5,
                 "{:?}: {} cycles per frame, expected {}",
-                region, measured, expected
+                region,
+                measured,
+                expected
             );
         }
     }

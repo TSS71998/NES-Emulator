@@ -1,4 +1,3 @@
-#[rustfmt::skip]
 use std::sync::LazyLock;
 
 /// SYSTEM_PALETTE for every combination of PPUMASK's color emphasis bits:
@@ -13,9 +12,12 @@ pub static EMPHASIS_PALETTE: LazyLock<[(u8, u8, u8); 512]> = LazyLock::new(|| {
         for emphasis in 0..8 {
             let tinted = ntsc_rgb(color, emphasis);
             let channel = |base: u8, k: usize| {
-                (base as f64 + 255.0 * (tinted[k] - plain[k])).round().clamp(0.0, 255.0) as u8
+                (base as f64 + 255.0 * (tinted[k] - plain[k]))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
-            palette[emphasis << 6 | color] = (channel(base.0, 0), channel(base.1, 1), channel(base.2, 2));
+            palette[emphasis << 6 | color] =
+                (channel(base.0, 0), channel(base.1, 1), channel(base.2, 2));
         }
     }
     palette
@@ -69,6 +71,7 @@ fn ntsc_rgb(color: usize, emphasis: usize) -> [f64; 3] {
     ]
 }
 
+#[rustfmt::skip]
 pub static SYSTEM_PALETTE: [(u8,u8,u8); 64] = [
     (0x80, 0x80, 0x80), (0x00, 0x3D, 0xA6), (0x00, 0x12, 0xB0), (0x44, 0x00, 0x96), (0xA1, 0x00, 0x5E), 
     (0xC7, 0x00, 0x28), (0xBA, 0x06, 0x00), (0x8C, 0x17, 0x00), (0x5C, 0x2F, 0x00), (0x10, 0x45, 0x00), 
@@ -114,8 +117,15 @@ mod tests {
         for grey in [0x00, 0x10, 0x20, 0x30] {
             let (r, g, b) = EMPHASIS_PALETTE[7 << 6 | grey];
             let base = SYSTEM_PALETTE[grey];
-            assert!(r < base.0 && g < base.1 && b < base.2, "{grey:#04x} is darker");
-            assert!(r.abs_diff(g) <= 3 && g.abs_diff(b) <= 3, "{grey:#04x} stays grey: {:?}", (r, g, b));
+            assert!(
+                r < base.0 && g < base.1 && b < base.2,
+                "{grey:#04x} is darker"
+            );
+            assert!(
+                r.abs_diff(g) <= 3 && g.abs_diff(b) <= 3,
+                "{grey:#04x} stays grey: {:?}",
+                (r, g, b)
+            );
         }
     }
 

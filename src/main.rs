@@ -18,8 +18,8 @@ use cartridge::Rom;
 use cpu::CPU;
 use frame_limiter::FrameLimiter;
 use mapper::SharedMapper;
-use region::Region;
 use ppu::NesPPU;
+use region::Region;
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
@@ -44,11 +44,14 @@ fn main() {
     let bytes: Vec<u8> = std::fs::read(&rom_path)
         .unwrap_or_else(|e| exit_with_error(&format!("can't read {}: {}", rom_path.display(), e)));
     let rom = Rom::new(&bytes).unwrap_or_else(|e| exit_with_error(&e));
-    
-    let file_name = rom_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+    let file_name = rom_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let (region, region_source) = match args.region {
         Some(region) => (region, "--region"),
-        None => Region::detect(&rom, &file_name)
+        None => Region::detect(&rom, &file_name),
     };
     println!(
         "{}: {} ({}), {:.4} fps, CPU {:.6} MHz",
@@ -124,7 +127,12 @@ fn main() {
 
             texture.update(None, &ppu.frame.data, 256 * 3).unwrap();
 
-            let visible = Rect::new(OVERSCAN_COLUMNS as i32, OVERSCAN_LINES as i32, VISIBLE_COLUMNS, VISIBLE_LINES);
+            let visible = Rect::new(
+                OVERSCAN_COLUMNS as i32,
+                OVERSCAN_LINES as i32,
+                VISIBLE_COLUMNS,
+                VISIBLE_LINES,
+            );
             canvas.copy(&texture, visible, None).unwrap();
 
             if !use_vsync {
@@ -182,7 +190,7 @@ fn main() {
 
 struct Args {
     rom: String,
-    region: Option<Region>
+    region: Option<Region>,
 }
 
 /// `nes_emulator [--region ntsc|pal|dendy] [rom]`
@@ -205,7 +213,10 @@ fn parse_args() -> Args {
             None => rom = Some(arg),
         }
     }
-    Args { rom: rom.unwrap_or_else(|| "Alter_Ego.nes".to_string()), region }
+    Args {
+        rom: rom.unwrap_or_else(|| "Alter_Ego.nes".to_string()),
+        region,
+    }
 }
 
 fn exit_with_error(message: &str) -> ! {

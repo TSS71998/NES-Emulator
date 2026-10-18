@@ -9,7 +9,7 @@ use crate::cartridge::{Rom, RomFormat, Timing};
 pub enum Region {
     Ntsc,
     Pal,
-    Dendy
+    Dendy,
 }
 
 /// APU frame sequencer step times, in CPU cycles since the sequence started.
@@ -54,7 +54,7 @@ impl Region {
         match self {
             Region::Ntsc => "NTSC",
             Region::Pal => "PAL",
-            Region::Dendy => "Dendy"
+            Region::Dendy => "Dendy",
         }
     }
 
@@ -63,7 +63,7 @@ impl Region {
     pub fn master_clock_hz(self) -> f64 {
         match self {
             Region::Ntsc => 236_250_000.0 / 11.0,
-            Region::Pal | Region::Dendy => 26_601_712.5
+            Region::Pal | Region::Dendy => 26_601_712.5,
         }
     }
 
@@ -72,7 +72,7 @@ impl Region {
         match self {
             Region::Ntsc => 12,
             Region::Pal => 16,
-            Region::Dendy => 15
+            Region::Dendy => 15,
         }
     }
 
@@ -80,7 +80,7 @@ impl Region {
     pub fn ppu_divider(self) -> u32 {
         match self {
             Region::Ntsc => 4,
-            Region::Pal | Region::Dendy => 5
+            Region::Pal | Region::Dendy => 5,
         }
     }
 
@@ -98,7 +98,7 @@ impl Region {
     pub fn scanlines_per_frame(self) -> u16 {
         match self {
             Region::Ntsc => 262,
-            Region::Pal | Region::Dendy => 312
+            Region::Pal | Region::Dendy => 312,
         }
     }
 
@@ -108,7 +108,7 @@ impl Region {
     pub fn vblank_scanline(self) -> u16 {
         match self {
             Region::Ntsc | Region::Pal => 241,
-            Region::Dendy => 291
+            Region::Dendy => 291,
         }
     }
 
@@ -126,7 +126,11 @@ impl Region {
     /// Average PPU dots per frame with rendering on.
     pub fn dots_per_frame(self) -> f64 {
         let dots = (DOTS_PER_SCANLINE * self.scanlines_per_frame() as u32) as f64;
-        if self.skips_odd_frame_dot() { dots - 0.5 } else { dots }
+        if self.skips_odd_frame_dot() {
+            dots - 0.5
+        } else {
+            dots
+        }
     }
 
     /// Average CPU cycles per frame: 29780.5 (NTSC), 33247.5 (PAL), 35464 (Dendy).
@@ -143,7 +147,7 @@ impl Region {
     pub fn noise_periods(self) -> &'static [u16; 16] {
         match self {
             Region::Pal => &PAL_NOISE_PERIODS,
-            Region::Ntsc | Region::Dendy => &NTSC_NOISE_PERIODS
+            Region::Ntsc | Region::Dendy => &NTSC_NOISE_PERIODS,
         }
     }
 
@@ -151,7 +155,7 @@ impl Region {
     pub fn dmc_rates(self) -> &'static [u16; 16] {
         match self {
             Region::Pal => &PAL_DMC_RATES,
-            Region::Ntsc | Region::Dendy => &NTSC_DMC_RATES
+            Region::Ntsc | Region::Dendy => &NTSC_DMC_RATES,
         }
     }
 
@@ -159,7 +163,7 @@ impl Region {
     pub fn frame_sequencer(self) -> FrameSequencerTiming {
         match self {
             Region::Pal => PAL_FRAME_SEQUENCER,
-            Region::Ntsc | Region::Dendy => NTSC_FRAME_SEQUENCER
+            Region::Ntsc | Region::Dendy => NTSC_FRAME_SEQUENCER,
         }
     }
 
@@ -168,7 +172,7 @@ impl Region {
             "ntsc" => Some(Region::Ntsc),
             "pal" => Some(Region::Pal),
             "dendy" => Some(Region::Dendy),
-            _ => None
+            _ => None,
         }
     }
 
@@ -180,7 +184,7 @@ impl Region {
         let from_header = match rom.timing {
             Timing::Pal => Some(Region::Pal),
             Timing::Dendy => Some(Region::Dendy),
-            Timing::Ntsc | Timing::MultiRegion => None
+            Timing::Ntsc | Timing::MultiRegion => None,
         };
         if let Some(region) = from_header {
             return (region, "ROM header");
@@ -243,7 +247,10 @@ mod test {
     #[test]
     fn test_detect_from_header() {
         let pal = rom(RomFormat::Nes2, Timing::Pal);
-        assert_eq!(Region::detect(&pal, "Game (U).nes"), (Region::Pal, "ROM header"));
+        assert_eq!(
+            Region::detect(&pal, "Game (U).nes"),
+            (Region::Pal, "ROM header")
+        );
         let dendy = rom(RomFormat::Nes2, Timing::Dendy);
         assert_eq!(Region::detect(&dendy, "game.nes").0, Region::Dendy);
         // an iNES header with the PAL bit set
@@ -254,15 +261,27 @@ mod test {
     #[test]
     fn test_nes2_ntsc_header_beats_file_name() {
         let ntsc = rom(RomFormat::Nes2, Timing::Ntsc);
-        assert_eq!(Region::detect(&ntsc, "Game (Europe).nes"), (Region::Ntsc, "ROM header"));
+        assert_eq!(
+            Region::detect(&ntsc, "Game (Europe).nes"),
+            (Region::Ntsc, "ROM header")
+        );
     }
 
     #[test]
     fn test_detect_from_file_name_for_ines() {
         let ines = rom(RomFormat::INes, Timing::Ntsc);
-        assert_eq!(Region::detect(&ines, "Tetris (E) [!].nes"), (Region::Pal, "file name"));
-        assert_eq!(Region::detect(&ines, "Super Mario Bros. 3 (Europe).nes").0, Region::Pal);
-        assert_eq!(Region::detect(&ines, "Tetris (U).nes"), (Region::Ntsc, "default"));
+        assert_eq!(
+            Region::detect(&ines, "Tetris (E) [!].nes"),
+            (Region::Pal, "file name")
+        );
+        assert_eq!(
+            Region::detect(&ines, "Super Mario Bros. 3 (Europe).nes").0,
+            Region::Pal
+        );
+        assert_eq!(
+            Region::detect(&ines, "Tetris (U).nes"),
+            (Region::Ntsc, "default")
+        );
         assert_eq!(Region::detect(&ines, "eagle.nes").0, Region::Ntsc);
     }
 }

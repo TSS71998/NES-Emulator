@@ -29,7 +29,7 @@ pub struct Mmc1 {
     chr_bank1: u8,
     prg_bank: u8,
 
-    last_write_cycle: Option<usize>
+    last_write_cycle: Option<usize>,
 }
 
 const PRG_BANK: usize = 0x4000;
@@ -52,7 +52,7 @@ impl Mmc1 {
             chr_bank1: 0,
             prg_bank: 0,
 
-            last_write_cycle: None
+            last_write_cycle: None,
         }
     }
 

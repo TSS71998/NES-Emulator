@@ -327,7 +327,11 @@ fn test_mid_line_palette_change_shows_from_that_dot() {
 
     let pixel = |x: usize, y: usize| {
         let i = (y * 256 + x) * 3;
-        (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+        (
+            ppu.frame.data[i],
+            ppu.frame.data[i + 1],
+            ppu.frame.data[i + 2],
+        )
     };
     assert_eq!(pixel(50, 50), SYSTEM_PALETTE[0x0F]);
     assert_eq!(pixel(126, 100), SYSTEM_PALETTE[0x0F]); // output at dot 127
@@ -381,7 +385,10 @@ fn test_ntsc_odd_frames_skip_a_dot() {
         lengths.push(dots);
     }
     lengths.sort();
-    assert_eq!(lengths, vec![341 * 262 - 1, 341 * 262 - 1, 341 * 262, 341 * 262]);
+    assert_eq!(
+        lengths,
+        vec![341 * 262 - 1, 341 * 262 - 1, 341 * 262, 341 * 262]
+    );
 }
 
 #[test]

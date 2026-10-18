@@ -30,7 +30,7 @@ struct LengthCounter {
     halt: bool,
     new_halt: bool,
     reload: u8,
-    previous: u8
+    previous: u8,
 }
 
 impl LengthCounter {
@@ -132,7 +132,7 @@ pub struct Pulse {
     sweep_shift: u8,
     sweep_divider: u8,
     sweep_reload: bool,
-    muted: bool
+    muted: bool,
 }
 
 impl Pulse {
@@ -147,7 +147,7 @@ impl Pulse {
 
     fn write_control(&mut self, value: u8) {
         self.duty = value >> 6;
-        self.length.set_halt(value & 0x20 != 0); 
+        self.length.set_halt(value & 0x20 != 0);
         self.envelope.write(value);
     }
 
@@ -174,7 +174,7 @@ impl Pulse {
     }
 
     #[inline]
-    fn clock_timer(&mut self) -> bool{
+    fn clock_timer(&mut self) -> bool {
         if self.timer == 0 {
             self.timer = self.timer_period;
             self.duty_pos = (self.duty_pos + 1) & 7;
@@ -363,7 +363,7 @@ struct Dmc {
     bits_remaining: u8,
     silence: bool,
     irq_flag: bool,
-     /// CPU cycles until a sample started by $4015 asks for its first byte.
+    /// CPU cycles until a sample started by $4015 asks for its first byte.
     start_delay: u8,
 }
 
@@ -384,7 +384,7 @@ impl Dmc {
             bits_remaining: 8,
             silence: true,
             irq_flag: false,
-            start_delay: 0
+            start_delay: 0,
         }
     }
 
@@ -449,7 +449,7 @@ impl Dmc {
     }
 
     #[inline]
-    fn clock_timer(&mut self) -> bool{
+    fn clock_timer(&mut self) -> bool {
         if self.timer > 0 {
             self.timer -= 1;
             return false;
@@ -536,7 +536,7 @@ impl LowPass {
 enum FrameClock {
     None,
     Quarter,
-    Half
+    Half,
 }
 
 /// The step types, the same for both modes: the 4-step sequence's steps 3
@@ -565,7 +565,7 @@ struct FrameCounter {
     /// A clock from the sequence and one from a 5-step-mode write landing
     /// within two cycles of each other only clock the units once.
     block_clocks: u8,
-    last_write: u8
+    last_write: u8,
 }
 
 impl FrameCounter {
@@ -583,7 +583,7 @@ impl FrameCounter {
             pending_write: None,
             write_delay: 0,
             block_clocks: 0,
-            last_write: 0
+            last_write: 0,
         };
         counter.set_timing(timing);
         counter
@@ -592,12 +592,25 @@ impl FrameCounter {
     fn set_timing(&mut self, t: FrameSequencerTiming) {
         let [q1, h1, q2] = t.steps;
         self.steps = [
-            [q1, h1, q2, t.four_step_end - 1, t.four_step_end, t.four_step_end + 1],
-            [q1, h1, q2, t.four_step_end, t.five_step_end, t.five_step_end + 1],
+            [
+                q1,
+                h1,
+                q2,
+                t.four_step_end - 1,
+                t.four_step_end,
+                t.four_step_end + 1,
+            ],
+            [
+                q1,
+                h1,
+                q2,
+                t.four_step_end,
+                t.five_step_end,
+                t.five_step_end + 1,
+            ],
         ];
     }
 
-    
     fn reset(&mut self) {
         let value = self.last_write;
         self.mode = (value >> 7) as usize;
@@ -688,7 +701,7 @@ pub struct APU {
     samples: Vec<f32>,
 
     mix_cache: f32,
-    mix_dirty: bool
+    mix_dirty: bool,
 }
 
 impl APU {
@@ -726,7 +739,7 @@ impl APU {
             low_pass_14k: LowPass::new(14000.0, sample_rate as f32),
             samples: Vec::with_capacity(sample_rate as usize / 30),
             mix_cache: 0.0,
-            mix_dirty: true
+            mix_dirty: true,
         }
     }
 
@@ -753,7 +766,10 @@ impl APU {
 
     pub fn write_register(&mut self, addr: u16, value: u8) {
         self.mix_dirty = true;
-        if matches!(addr, 0x4000 | 0x4003 | 0x4004 | 0x4007 | 0x4008 | 0x400B | 0x400C | 0x400F) {
+        if matches!(
+            addr,
+            0x4000 | 0x4003 | 0x4004 | 0x4007 | 0x4008 | 0x400B | 0x400C | 0x400F
+        ) {
             self.length_writes_pending = true;
         }
         match addr {
@@ -984,7 +1000,11 @@ mod test {
         apu.write_register(0x4012, 0x01); // $C040
         apu.write_register(0x4013, 0x00); // 1 byte
         apu.write_register(0x4015, 0x10);
-        assert_eq!(apu.dmc_fetch_addr(), None, "the first fetch waits 2-3 cycles");
+        assert_eq!(
+            apu.dmc_fetch_addr(),
+            None,
+            "the first fetch waits 2-3 cycles"
+        );
         for _ in 0..3 {
             apu.tick();
         }
@@ -1059,7 +1079,7 @@ mod test {
         assert_eq!(half_frame_interval(Region::Dendy), 29829 - 14913);
     }
 
-     fn run(apu: &mut APU, cycles: u32) {
+    fn run(apu: &mut APU, cycles: u32) {
         for _ in 0..cycles {
             apu.tick();
         }

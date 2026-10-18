@@ -198,7 +198,7 @@ pub(crate) mod test_util {
         a12_low_since: u64,
         /// (ppu_cycle / 341, ppu_cycle % 341) of each A12 rise
         pub rises_at: Vec<(u64, u64)>,
-        pub writes: Vec<(u16, u8)>
+        pub writes: Vec<(u16, u8)>,
     }
 
     impl ScanlineCounter {
@@ -212,7 +212,7 @@ pub(crate) mod test_util {
                 a12_high: false,
                 a12_low_since: 0,
                 rises_at: vec![],
-                writes: vec![]
+                writes: vec![],
             }
         }
     }

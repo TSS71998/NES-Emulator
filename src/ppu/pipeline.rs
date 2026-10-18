@@ -8,7 +8,7 @@
 //! tile $FF, so the pattern table is read 8 times per line either way.
 //! That is where MMC3 sees A12 go high when sprites use $1000.
 
-use super::{palette_index, NesPPU};
+use super::{NesPPU, palette_index};
 use crate::region::Region;
 use crate::render::palette::EMPHASIS_PALETTE;
 #[derive(Default)]
@@ -20,7 +20,7 @@ pub(super) struct Background {
     pattern_low: u16,
     pattern_high: u16,
     attribute_low: u16,
-    attribute_high: u16
+    attribute_high: u16,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -28,7 +28,7 @@ struct SpritePixel {
     value: u8,
     palette: u8,
     behind_background: bool,
-    sprite_zero: bool
+    sprite_zero: bool,
 }
 
 pub(super) struct Sprites {
@@ -49,7 +49,7 @@ pub(super) struct Sprites {
     done: bool,
     overflow_reads: u8,
     line: [SpritePixel; 256],
-    next_line: [SpritePixel; 256]
+    next_line: [SpritePixel; 256],
 }
 
 impl Default for Sprites {
@@ -90,9 +90,11 @@ impl NesPPU {
         if visible && (1..=256).contains(&dot) {
             self.output_pixel();
         }
+
         if visible && (1..=256).contains(&dot) {
             self.evaluate_sprites();
         }
+
         if dot == 321 {
             self.sprites.buffer = self.sprites.secondary[0];
         }
@@ -103,7 +105,6 @@ impl NesPPU {
                 if dot == 257 {
                     self.load_shifters();
                     self.copy_horizontal();
-                    self.evaluate_sprites();
                     if !visible {
                         self.sprites.count = 0;
                     }
@@ -186,7 +187,7 @@ impl NesPPU {
 
     fn background_pattern_addr(&self) -> u16 {
         let fine_y = (self.v >> 12) & 0b111;
-        self.ctrl.bknd_pattern_addr() + self.bg.next_tile as u16 * 16 + fine_y  
+        self.ctrl.bknd_pattern_addr() + self.bg.next_tile as u16 * 16 + fine_y
     }
 
     fn read_nametable(&self, addr: u16) -> u8 {
@@ -247,7 +248,7 @@ impl NesPPU {
         let height = self.ctrl.sprite_size() as u16;
         let line = self.scanline;
         let sprites = &mut self.sprites;
-        
+
         if dot <= 64 {
             sprites.buffer = 0xFF;
             sprites.secondary[(dot as usize - 1) >> 1] = 0xFF;
@@ -269,7 +270,7 @@ impl NesPPU {
             return;
         }
 
-        let in_range = |y: u8| line >= y as u16 && line < y as u16 + height; 
+        let in_range = |y: u8| line >= y as u16 && line < y as u16 + height;
         let mut overflow = false;
         if sprites.done {
             sprites.n = (sprites.n + 1) & 0x3F;
@@ -388,7 +389,10 @@ impl NesPPU {
             return;
         }
         let addr = self.sprite_fetch_addr(slot);
-        let (attr, x) = (self.sprites.secondary[slot * 4 + 2], self.sprites.secondary[slot * 4 + 3]);
+        let (attr, x) = (
+            self.sprites.secondary[slot * 4 + 2],
+            self.sprites.secondary[slot * 4 + 3],
+        );
         let sprite_zero = slot == 0 && self.sprites.sprite_zero_found;
         let mut low = self.chr_read(addr);
         let mut high = self.chr_read(addr + 8);
@@ -424,7 +428,8 @@ impl NesPPU {
             let bit = 15 - self.fine_x;
             let bg = &self.bg;
             bg_value = (((bg.pattern_high >> bit) & 1) << 1 | ((bg.pattern_low >> bit) & 1)) as u8;
-            bg_palette = (((bg.attribute_high >> bit) & 1) << 1 | ((bg.attribute_low >> bit) & 1)) as u8;
+            bg_palette =
+                (((bg.attribute_high >> bit) & 1) << 1 | ((bg.attribute_low >> bit) & 1)) as u8;
         }
 
         let mut sprite = SpritePixel::default();
@@ -466,8 +471,14 @@ impl NesPPU {
     }
 
     fn put_pixel(&mut self, x: usize, color: u8) {
-        let color = if self.mask.is_greyscale() { color & 0x30 } else { color };
-        let emphasis = self.mask.emphasise(matches!(self.region, Region::Pal | Region::Dendy));
+        let color = if self.mask.is_greyscale() {
+            color & 0x30
+        } else {
+            color
+        };
+        let emphasis = self
+            .mask
+            .emphasise(matches!(self.region, Region::Pal | Region::Dendy));
         let rgb = EMPHASIS_PALETTE[emphasis << 6 | (color & 0x3F) as usize];
         let i = (self.scanline as usize * 256 + x) * 3;
         self.frame.data[i] = rgb.0;
@@ -520,7 +531,11 @@ mod test {
         run_frame(ppu);
         run_frame(ppu);
         let i = (y * 256 + x) * 3;
-        (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+        (
+            ppu.frame.data[i],
+            ppu.frame.data[i + 1],
+            ppu.frame.data[i + 2],
+        )
     }
 
     fn colour(index: u8) -> (u8, u8, u8) {
@@ -550,10 +565,19 @@ mod test {
         ppu.vram[12 * 32 + 12] = 1; // opaque background tile at x 96-103, y 96-103
         sprite(&mut ppu, 0, 20, 9, 0);
         ppu.write_to_mask(0b0011_1110); // emphasise red
-        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[1 << 6 | GREEN as usize]);
-        assert_eq!(pixel(&mut ppu, 22, 10), EMPHASIS_PALETTE[1 << 6 | RED as usize]);
+        assert_eq!(
+            pixel(&mut ppu, 100, 100),
+            EMPHASIS_PALETTE[1 << 6 | GREEN as usize]
+        );
+        assert_eq!(
+            pixel(&mut ppu, 22, 10),
+            EMPHASIS_PALETTE[1 << 6 | RED as usize]
+        );
         ppu.write_to_mask(0b1111_1111); // all three, greyscale on
-        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[7 << 6 | (GREEN & 0x30) as usize]);
+        assert_eq!(
+            pixel(&mut ppu, 100, 100),
+            EMPHASIS_PALETTE[7 << 6 | (GREEN & 0x30) as usize]
+        );
         // with rendering off the backdrop is tinted too
         ppu.write_to_mask(0b1000_0000);
         assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[4 << 6 | 0x0F]);
@@ -565,9 +589,15 @@ mod test {
         ppu.vram[12 * 32 + 12] = 1; // opaque background tile at x 96-103, y 96-103
         ppu.set_region(Region::Pal);
         ppu.write_to_mask(0b0011_1110); // bit 5: green on PAL
-        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[2 << 6 | GREEN as usize]);
+        assert_eq!(
+            pixel(&mut ppu, 100, 100),
+            EMPHASIS_PALETTE[2 << 6 | GREEN as usize]
+        );
         ppu.write_to_mask(0b0101_1110); // bit 6: red on PAL
-        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[1 << 6 | GREEN as usize]);
+        assert_eq!(
+            pixel(&mut ppu, 100, 100),
+            EMPHASIS_PALETTE[1 << 6 | GREEN as usize]
+        );
     }
 
     #[test]
@@ -662,7 +692,11 @@ mod test {
         run_to(&mut ppu, 51, 0);
         let at = |x: usize| {
             let i = (50 * 256 + x) * 3;
-            (ppu.frame.data[i], ppu.frame.data[i + 1], ppu.frame.data[i + 2])
+            (
+                ppu.frame.data[i],
+                ppu.frame.data[i + 1],
+                ppu.frame.data[i + 2],
+            )
         };
         assert_eq!(at(12), colour(0x0F), "sprite 0 is skipped");
         assert_eq!(at(42), colour(RED), "sprite 1 is found");
