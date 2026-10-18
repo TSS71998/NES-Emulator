@@ -362,7 +362,9 @@ struct Dmc {
     shift_reg: u8,
     bits_remaining: u8,
     silence: bool,
-    irq_flag: bool
+    irq_flag: bool,
+     /// CPU cycles until a sample started by $4015 asks for its first byte.
+    start_delay: u8,
 }
 
 impl Dmc {
@@ -381,7 +383,8 @@ impl Dmc {
             shift_reg: 0,
             bits_remaining: 8,
             silence: true,
-            irq_flag: false
+            irq_flag: false,
+            start_delay: 0
         }
     }
 
@@ -411,16 +414,17 @@ impl Dmc {
         self.bytes_remaining = self.sample_len;
     }
 
-    fn set_enabled(&mut self, enabled: bool) {
+    fn set_enabled(&mut self, enabled: bool, even_cycle: bool) {
         if !enabled {
             self.bytes_remaining = 0;
         } else if self.bytes_remaining == 0 {
             self.restart();
+            self.start_delay = if even_cycle { 2 } else { 3 };
         }
     }
 
     fn fetch_addr(&self) -> Option<u16> {
-        if self.sample_buffer.is_none() && self.bytes_remaining > 0 {
+        if self.start_delay == 0 && self.sample_buffer.is_none() && self.bytes_remaining > 0 {
             Some(self.current_addr)
         } else {
             None
@@ -758,7 +762,7 @@ impl APU {
                 self.pulse2.length.set_enabled(value & 0x02 != 0);
                 self.triangle.length.set_enabled(value & 0x04 != 0);
                 self.noise.length.set_enabled(value & 0x08 != 0);
-                self.dmc.set_enabled(value & 0x10 != 0);
+                self.dmc.set_enabled(value & 0x10 != 0, !self.odd_cycle);
                 self.dmc.irq_flag = false;
             }
             0x4017 => self.frame_counter.write(value, !self.odd_cycle),
@@ -857,6 +861,9 @@ impl APU {
 
     pub fn tick(&mut self) {
         self.clock_frame_sequencer();
+        if self.dmc.start_delay > 0 {
+            self.dmc.start_delay -= 1;
+        }
 
         let mut changed = self.triangle.clock_timer();
         changed |= self.noise.clock_timer();
@@ -957,6 +964,10 @@ mod test {
         apu.write_register(0x4012, 0x01); // $C040
         apu.write_register(0x4013, 0x00); // 1 byte
         apu.write_register(0x4015, 0x10);
+        assert_eq!(apu.dmc_fetch_addr(), None, "the first fetch waits 2-3 cycles");
+        for _ in 0..3 {
+            apu.tick();
+        }
         assert_eq!(apu.dmc_fetch_addr(), Some(0xc040));
         apu.dmc_provide_byte(0xff);
         assert_eq!(apu.dmc_fetch_addr(), None);

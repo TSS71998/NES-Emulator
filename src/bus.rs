@@ -4,7 +4,6 @@ use crate::joypad::Joypad;
 use crate::mapper::SharedMapper;
 use crate::region::Region;
 use crate::ppu::NesPPU;
-use crate::ppu::PPU;
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -40,8 +39,11 @@ pub struct Bus<'call> {
     ppu: NesPPU,
     apu: APU,
 
-    stall_cycles: usize,
-    oam_dma_pending: bool,
+    need_halt: bool,
+    need_dummy_read: bool,
+    dmc_dma_running: bool,
+    oam_dma_page: Option<u8>,
+    dma_joypad_held: bool,
 
     // Last value driven on the CPU data bus. Reads from addresses nothing
     // responds to return it ("open bus") instead of panicking.
@@ -89,8 +91,11 @@ impl<'a> Bus<'a> {
             ppu: NesPPU::new(mapper.clone()),
             mapper,
             apu: APU::new(44100),
-            stall_cycles: 0,
-            oam_dma_pending: false,
+            need_halt: false,
+            need_dummy_read: false,
+            dmc_dma_running: false,
+            oam_dma_page: None,
+            dma_joypad_held: false,
             open_bus: 0,
             cycles: 0,
             master_clock: 0,
@@ -148,10 +153,13 @@ impl<'a> Bus<'a> {
             self.idle_cycle();
         }
         self.instruction_cycles = 0;
-        self.run_dma();
     }
 
     pub fn cpu_read(&mut self, addr: u16) -> u8 {
+        if self.need_halt {
+            self.run_dma(Some(addr));
+        }
+        self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.start_cycle(true);
         let value = self.mem_read(addr);
         self.end_cycle(true);
@@ -159,12 +167,17 @@ impl<'a> Bus<'a> {
     }
 
     pub fn cpu_write(&mut self, addr: u16, data: u8) {
+        self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.start_cycle(false);
         self.mem_write(addr, data);
         self.end_cycle(false);
     }
 
     pub fn idle_cycle(&mut self) {
+        if self.need_halt {
+            self.run_dma(None);
+        }
+        self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.start_cycle(true);
         self.end_cycle(true);
     }
@@ -178,21 +191,93 @@ impl<'a> Bus<'a> {
             self.idle_cycle();
         }
         self.instruction_cycles = 0;
-        self.run_dma();
     }
 
-    fn run_dma(&mut self) {
-        if self.oam_dma_pending {
-            self.oam_dma_pending = false;
-            self.stall_cycles += 513 + self.cycles % 2;
-        }
+    /// Runs pending DMA, halting the CPU on the read of `read_addr` (`None`
+    /// for a read we don't model the address of). As on hardware (and in
+    /// Mesen, which this follows):
+    ///
+    /// - The first cycle is the halt: the CPU's read happens and is ignored,
+    ///   then gets repeated on every cycle the DMA unit isn't using the bus.
+    ///   Those repeats have side effects ($2007 advances, $4016 clocks the
+    ///   controller), which is what blargg's dmc_dma_during_read4 checks.
+    /// - DMA then alternates "get" (read) and "put" (write) cycles, by the
+    ///   parity of the CPU cycle count. OAM DMA reads a byte on a get cycle
+    ///   and writes it to $2004 on the next put cycle: 256 pairs, plus the
+    ///   halt and possibly one alignment cycle, giving 513 or 514 cycles.
+    /// - A DMC fetch needs a halt and a dummy cycle, then reads its byte on
+    ///   a get cycle: 3 or 4 cycles alone. During OAM DMA the OAM cycles
+    ///   count as its halt and dummy, so it usually adds just 2.
+    fn run_dma(&mut self, read_addr: Option<u16>) {
+        self.dma_joypad_held = false;
+        self.dma_cycle(|bus| bus.dma_dummy_read(read_addr));
+        self.need_halt = false;
 
-        while self.stall_cycles > 0 {
-            self.stall_cycles -= 1;
-            self.start_cycle(true);
-            self.end_cycle(true);
-            self.instruction_cycles = 0;
+        let mut oam_cycles = 0u16;
+        let mut oam_low = 0u8;
+        let mut oam_value = 0u8;
+        while self.dmc_dma_running || self.oam_dma_page.is_some() {
+            let get_cycle = self.cycles % 2 == 0;
+            if get_cycle {
+                if self.dmc_dma_running && !self.need_halt && !self.need_dummy_read {
+                    self.dma_cycle(|bus| {
+                        bus.dma_joypad_held = false; // the DMA unit takes the bus
+                        if let Some(addr) = bus.apu.dmc_fetch_addr() {
+                            let byte = bus.mem_read(addr);
+                            bus.apu.dmc_provide_byte(byte);
+                        }
+                    });
+                    self.dmc_dma_running = false;
+                } else if let Some(page) = self.oam_dma_page {
+                    let addr = (page as u16) << 8 | oam_low as u16;
+                    self.dma_cycle(|bus| {
+                        bus.dma_joypad_held = false;
+                        oam_value = bus.mem_read(addr);
+                    });
+                    oam_low = oam_low.wrapping_add(1);
+                    oam_cycles += 1;
+                } else {
+                    self.dma_cycle(|bus| bus.dma_dummy_read(read_addr));
+                }
+            } else if self.oam_dma_page.is_some() && oam_cycles % 2 == 1 {
+                self.dma_cycle(|bus| {
+                    bus.dma_joypad_held = false;
+                    bus.ppu.cpu_write(4, oam_value);
+                });
+                oam_cycles += 1;
+                if oam_cycles == 512 {
+                    self.oam_dma_page = None;
+                }
+            } else {
+                self.dma_cycle(|bus| bus.dma_dummy_read(read_addr));
+            }
         }
+    }
+
+    /// One CPU cycle taken by the DMA unit. A cycle spent on OAM DMA counts
+    /// as the DMC's halt or dummy cycle if it needs one.
+    fn dma_cycle(&mut self, access: impl FnOnce(&mut Self)) {
+        if self.need_halt {
+            self.need_halt = false;
+        } else if self.need_dummy_read {
+            self.need_dummy_read = false;
+        }
+        self.start_cycle(true);
+        access(self);
+        self.end_cycle(true);
+    }
+
+    /// The halted CPU's read, repeated. The controller ports only see the
+    /// first of a run of these: the address stays on $4016 the whole time,
+    /// so the controller gets one read signal, not one per cycle. (Reads of
+    /// $2007 do repeat, since the PPU acts on every read cycle.)
+    fn dma_dummy_read(&mut self, read_addr: Option<u16>) {
+        let Some(addr) = read_addr else { return };
+        let joypad = addr == 0x4016 || addr == 0x4017;
+        if !(joypad && self.dma_joypad_held) {
+            self.mem_read(addr);
+        }
+        self.dma_joypad_held = joypad;
     }
 
     /// Master clock ticks from the start of a CPU cycle to its access. Reads
@@ -204,16 +289,15 @@ impl<'a> Bus<'a> {
     }
 
     fn start_cycle(&mut self, read: bool) {
-        self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.cycles += 1;
         self.master_clock += self.access_point(read);
         self.run_ppu();
 
         self.apu.tick();
-        if let Some(addr) = self.apu.dmc_fetch_addr() {
-            let byte = self.cartridge_read(addr);
-            self.apu.dmc_provide_byte(byte);
-            self.stall_cycles += 4;
+        if !self.dmc_dma_running && self.apu.dmc_fetch_addr().is_some() {
+            self.dmc_dma_running = true;
+            self.need_halt = true;
+            self.need_dummy_read = true;
         }
     }
 
@@ -319,15 +403,8 @@ impl Mem for Bus<'_> {
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, data),
 
             0x4014 => {
-                let mut buffer: [u8; 256] = [0; 256];
-                let hi: u16 = (data as u16) << 8;
-                for i in 0..256u16 {
-                    buffer[i as usize] = self.mem_read(hi + i);
-                }
-
-                self.ppu.write_oam_dma(&buffer);
-
-                self.oam_dma_pending = true;
+                self.oam_dma_page = Some(data);
+                self.need_halt = true;
             }
 
             0x4016 => {
@@ -447,5 +524,40 @@ mod test {
         assert_eq!(bus.mem_read(0x01), 0x00);
         assert_eq!(bus.mem_read(0x2001), 0xB2); // write-only: the latch
         assert_eq!(bus.mem_read(0x2002) & 0x1F, 0x12); // low 5 bits of $2002 too
+    }
+
+    #[test]
+    fn test_oam_dma_waits_for_a_read_then_copies_the_page() {
+        let mut bus = test_bus();
+        for i in 0..256u16 {
+            bus.mem_write(0x0200 + i, i as u8);
+        }
+        bus.cpu_write(0x4014, 0x02);
+        let start = bus.cpu_cycles();
+        bus.cpu_write(0x0000, 0x00); // writes can't be halted
+        assert_eq!(bus.cpu_cycles() - start, 1);
+
+        let start = bus.cpu_cycles();
+        bus.cpu_read(0x0000); // halts here: 513 or 514 cycles, then the read
+        let taken = bus.cpu_cycles() - start;
+        assert!(taken == 514 || taken == 515, "took {}", taken);
+        assert_eq!(bus.ppu.oam_data[0x01], 0x01);
+        assert_eq!(bus.ppu.oam_data[0x02], 0x02 & 0xE3); // attribute byte
+        assert_eq!(bus.ppu.oam_data[0xFF], 0xFF);
+    }
+
+    #[test]
+    fn test_oam_dma_length_depends_on_cycle_parity() {
+        let mut lengths = vec![];
+        for offset in 0..2 {
+            let mut bus = test_bus();
+            bus.tick(offset);
+            bus.cpu_write(0x4014, 0x02);
+            let start = bus.cpu_cycles();
+            bus.cpu_read(0x0000);
+            lengths.push(bus.cpu_cycles() - start - 1);
+        }
+        lengths.sort();
+        assert_eq!(lengths, vec![513, 514]);
     }
 }

@@ -163,8 +163,16 @@ fn resolve_address(
 
     match mode {
         AddressingMode::ZeroPage => (read(addr) as u16, false),
-        AddressingMode::ZeroPage_X => (read(addr).wrapping_add(x) as u16, false),
-        AddressingMode::ZeroPage_Y => (read(addr).wrapping_add(y) as u16, false),
+        AddressingMode::ZeroPage_X => {
+            let base = read(addr);
+            read(base as u16);
+            (base.wrapping_add(x) as u16, false)
+        }
+        AddressingMode::ZeroPage_Y => {
+            let base = read(addr);
+            read(base as u16);
+            (base.wrapping_add(y) as u16, false)
+        }
         AddressingMode::Absolute => (pointer(&mut read, addr, addr.wrapping_add(1)), false),
         AddressingMode::Absolute_X => {
             let base = pointer(&mut read, addr, addr.wrapping_add(1));
@@ -177,7 +185,9 @@ fn resolve_address(
             (addr, page_cross(base, addr))
         }
         AddressingMode::Indirect_X => {
-            let ptr = read(addr).wrapping_add(x);
+            let base = read(addr);
+            read(base as u16);
+            let ptr = base.wrapping_add(x);
             (
                 pointer(&mut read, ptr as u16, ptr.wrapping_add(1) as u16),
                 false,
@@ -278,7 +288,7 @@ impl<'a> CPU<'a> {
     fn read_modify_write(&mut self, mode: &AddressingMode, op: impl FnOnce(&mut Self, u8) -> u8) -> u8 {
         let (addr, page_cross) = self.get_operand_address(mode);
         if let Some(dummy) = uncorrected_addr(mode, addr, page_cross) {
-            self.dummy_read(dummy);
+            self.mem_read(dummy);
         }
         self.wait_until(self.cycles - 3);
         let old = self.mem_read(addr);
@@ -295,7 +305,7 @@ impl<'a> CPU<'a> {
     /// the address written to. 
     fn unstable_store(&mut self, base: u16, index: u8, value: u8) {
         let addr = base.wrapping_add(index as u16);
-        self.dummy_read((base & 0xFF00) | (addr & 0xFF00));
+        self.dummy_read((base & 0xFF00) | (addr & 0x00FF));
         let data = value & ((base >> 8) as u8).wrapping_add(1);
         let addr = if page_cross(base, addr) {
             (data as u16) << 8 | (addr & 0x00FF)
@@ -607,12 +617,18 @@ impl<'a> CPU<'a> {
         })
     }
 
+    fn stack_dummy_read(&mut self) {
+        self.mem_read(STACK + self.stack_pointer as u16);
+    }
+
     fn pla(&mut self) {
+        self.stack_dummy_read();
         let data = self.stack_pop();
         self.set_register_a(data);
     }
 
     fn plp(&mut self) {
+        self.stack_dummy_read();
         self.status.bits = self.stack_pop();
         self.status.remove(CpuFlags::BREAK);
         self.status.insert(CpuFlags::BREAK2);
@@ -650,20 +666,21 @@ impl<'a> CPU<'a> {
         self.update_zero_and_negative_flags(compare_with.wrapping_sub(data));
     }
 
-    /// A taken branch takes a cycle longer, and another if it lands on a
-    /// different page.
+    /// The offset is always read. A taken branch spends a cycle reading the
+    /// next opcode, and if it crosses a page another reading the target's
+    /// low byte on the old page.
     fn branch(&mut self, condition: bool) {
+        let jump = self.mem_read(self.program_counter) as i8;
         if condition {
             self.cycles += 1;
 
-            let jump: i8 = self.mem_read(self.program_counter) as i8;
-            let jump_addr = self
-                .program_counter
-                .wrapping_add(1)
-                .wrapping_add(jump as u16);
+            let next = self.program_counter.wrapping_add(1);
+            let jump_addr = next.wrapping_add(jump as u16);
+            self.mem_read(next);
 
-            if self.program_counter.wrapping_add(1) & 0xFF00 != jump_addr & 0xFF00 {
+            if next & 0xFF00 != jump_addr & 0xFF00 {
                 self.cycles += 1;
+                self.mem_read((next & 0xFF00) | (jump_addr & 0x00FF));
             }
 
             self.program_counter = jump_addr;
@@ -933,18 +950,24 @@ impl<'a> CPU<'a> {
 
             /* JSR */
             0x20 => {
+                let lo = self.mem_read(self.program_counter) as u16;
+                self.stack_dummy_read();
                 self.stack_push_u16(self.program_counter.wrapping_add(1));
-                let target_address = self.mem_read_u16(self.program_counter);
-                self.program_counter = target_address
+                let hi = self.mem_read_u16(self.program_counter.wrapping_add(1)) as u16;
+                self.program_counter = hi << 8 | lo
             }
 
             /* RTS */
             0x60 => {
-                self.program_counter = self.stack_pop_u16() + 1;
+                self.stack_dummy_read();
+                let return_addr = self.stack_pop_u16();
+                self.mem_read(return_addr);
+                self.program_counter = return_addr.wrapping_add(1);
             }
 
             /* RTI */
             0x40 => {
+                self.stack_dummy_read();
                 self.status.bits = self.stack_pop();
                 self.status.remove(CpuFlags::BREAK);
                 self.status.insert(CpuFlags::BREAK2);

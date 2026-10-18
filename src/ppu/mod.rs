@@ -55,6 +55,8 @@ pub struct NesPPU {
     nametable_base: [u16; 4],
     mapper_watches_bus: bool,
     odd_frame: bool,
+
+    last_data_read: Option<u64>,
     
     pub scanline: u16,
     pub dot: u16,
@@ -121,6 +123,7 @@ impl NesPPU {
             internal_data_buf: 0,
             region,
             odd_frame: false,
+            last_data_read: None,
             scanline: 0,
             dot: 0,
             ppu_cycle: 0,
@@ -321,6 +324,10 @@ impl NesPPU {
                 value
             }
             7 => {
+                if self.last_data_read.is_some_and(|at| self.ppu_cycle - at < DATA_READ_BUSY_DOTS) {
+                    return self.io_latch();
+                }
+                self.last_data_read = Some(self.ppu_cycle);
                 let palette = self.vram_addr() >= 0x3F00;
                 let value = self.read_data();
                 if palette {
@@ -374,6 +381,10 @@ impl NesPPU {
 /// About 600 ms of PPU dots (NTSC 5.37 MHz; PAL's 5.32 MHz is close enough
 /// given how much real consoles vary).
 const IO_LATCH_DECAY_DOTS: u64 = 3_200_000;
+
+/// A $2007 read this soon after the last one is ignored (two CPU cycles on
+/// NTSC; the figure Mesen uses).
+const DATA_READ_BUSY_DOTS: u64 = 6;
 
 /// OAM byte 2 of each sprite (the attributes) has no bits 2-4: they always
 /// read back as 0.
