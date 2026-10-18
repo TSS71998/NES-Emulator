@@ -33,7 +33,9 @@ use std::rc::Rc;
 extern crate bitflags;
 
 const OVERSCAN_LINES: u32 = 8;
+const OVERSCAN_COLUMNS: u32 = 8;
 const VISIBLE_LINES: u32 = 240 - 2 * OVERSCAN_LINES;
+const VISIBLE_COLUMNS: u32 = 256 - 2 * OVERSCAN_COLUMNS;
 const SCALE: u32 = 3;
 
 fn main() {
@@ -62,7 +64,7 @@ fn main() {
     let video_subsystem = sdl_context.video().unwrap();
     let title = format!("NES Emulator - {} ({})", file_name, region.name());
     let window = video_subsystem
-        .window(&title, 256 * SCALE, VISIBLE_LINES * SCALE)
+        .window(&title, VISIBLE_COLUMNS * SCALE, VISIBLE_LINES * SCALE)
         .position_centered()
         .build()
         .unwrap();
@@ -122,7 +124,7 @@ fn main() {
 
             texture.update(None, &ppu.frame.data, 256 * 3).unwrap();
 
-            let visible = Rect::new(0, OVERSCAN_LINES as i32, 256, VISIBLE_LINES);
+            let visible = Rect::new(OVERSCAN_COLUMNS as i32, OVERSCAN_LINES as i32, VISIBLE_COLUMNS, VISIBLE_LINES);
             canvas.copy(&texture, visible, None).unwrap();
 
             if !use_vsync {

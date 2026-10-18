@@ -768,6 +768,7 @@ impl<'a> CPU<'a> {
         self.status.insert(CpuFlags::INTERRUPT_DISABLE);
         self.program_counter = self.mem_read_u16(0xFFFC);
         self.bus.finish_instruction(self.cycles);
+        self.sync_irq_mask();
         self.bus.defer_interrupt_poll();
     }
 

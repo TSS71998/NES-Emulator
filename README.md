@@ -25,6 +25,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM). Together these cover most of the NES library. MMC1 ignores a write on the cycle right after another, as the real chip does, so read-modify-write instructions on its registers work. MMC3 passes blargg's `mmc3_test_2` tests 1–5, including `4-scanline_timing` (IRQ timing to the PPU dot), and 6 for boards marked as MMC3A in a NES 2.0 header.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
 - **Input**: keyboard as controller 1. The bus emulates both controller ports.
+- **Display**: the 8-pixel border a TV hides is cropped on every side (`OVERSCAN_LINES` and `OVERSCAN_COLUMNS` in `main.rs`), showing 240×224. Without the side crop, games that clip the left column (such as *Super Mario Bros. 3*) show an 8-pixel strip of the background colour at the left, as real hardware does.
 
 ## Limitations
 
@@ -32,7 +33,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - **Sprite evaluation timing.** The 8 sprites for the next line are found all at once on dot 257, not one by one over dots 65–256. So the overflow flag is set a little late (blargg's `sprite_overflow_tests` pass 4 of 5; `3.Timing` fails), and OAM writes during rendering don't corrupt OAM as they would on hardware.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **PAL colours.** PAL's swapped red/green emphasis bits and its slightly different palette aren't modelled (colour emphasis isn't emulated in any region).
-- **Not implemented:** keyboard mapping for controller 2
+- **Not implemented:** keyboard mapping for controller 2.
 - **PPU after reset.** On a front-loading NES the PPU ignores writes to some registers until the end of the first frame after reset; that isn't modelled (the Famicom doesn't do it either).
 
 ## Building and running
