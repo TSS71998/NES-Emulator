@@ -22,10 +22,12 @@ use region::Region;
 use ppu::NesPPU;
 
 use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
+use sdl2::keyboard::{Keycode, Mod};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::rect::Rect;
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[macro_use]
 extern crate bitflags;
@@ -108,6 +110,9 @@ fn main() {
     key_map.insert(Keycode::A, joypad::JoypadButton::BUTTON_A);
     key_map.insert(Keycode::S, joypad::JoypadButton::BUTTON_B);
 
+    let reset_requested = Rc::new(Cell::new(false));
+    let reset_pressed = reset_requested.clone();
+
     // run the game cycle
     let mut bus = Bus::new(
         cartridge,
@@ -134,6 +139,14 @@ fn main() {
                         saver.save();
                         std::process::exit(0)
                     }
+                    Event::KeyDown {
+                        keycode: Some(Keycode::R),
+                        keymod,
+                        repeat: false,
+                        ..
+                    } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                        reset_pressed.set(true);
+                    }
                     Event::KeyDown { keycode, .. } => {
                         if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
                             joypad.set_button_pressed_status(*key, true);
@@ -158,7 +171,11 @@ fn main() {
     let mut cpu = CPU::new(bus);
 
     cpu.reset();
-    cpu.run();
+    cpu.run_with_callback(move |cpu| {
+        if reset_requested.take() {
+            cpu.request_reset();
+        }
+    });
 }
 
 struct Args {

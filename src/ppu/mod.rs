@@ -376,6 +376,13 @@ impl NesPPU {
             }
         }
     }
+
+    pub fn reset(&mut self) {
+        self.ctrl.update(0);
+        self.mask.update(0);
+        self.write_latch = false;
+        self.update_nmi_line();
+    }
 }
 
 /// About 600 ms of PPU dots (NTSC 5.37 MHz; PAL's 5.32 MHz is close enough

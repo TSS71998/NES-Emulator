@@ -4,4 +4,5 @@
 /nestest.log
 *.nes
 !Alter_Ego.nes
+!smb3.nes
 *.sav

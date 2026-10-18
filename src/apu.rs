@@ -564,7 +564,8 @@ struct FrameCounter {
     write_delay: u8,
     /// A clock from the sequence and one from a 5-step-mode write landing
     /// within two cycles of each other only clock the units once.
-    block_clocks: u8
+    block_clocks: u8,
+    last_write: u8
 }
 
 impl FrameCounter {
@@ -582,6 +583,7 @@ impl FrameCounter {
             pending_write: None,
             write_delay: 0,
             block_clocks: 0,
+            last_write: 0
         };
         counter.set_timing(timing);
         counter
@@ -595,7 +597,20 @@ impl FrameCounter {
         ];
     }
 
+    
+    fn reset(&mut self) {
+        let value = self.last_write;
+        self.mode = (value >> 7) as usize;
+        self.step = 0;
+        self.cycle = 0;
+        self.irq_inhibit = value & 0x40 != 0;
+        self.irq_flag = false;
+        self.pending_write = None;
+        self.block_clocks = 0
+    }
+
     fn write(&mut self, value: u8, apu_cycle: bool) {
+        self.last_write = value;
         self.pending_write = Some(value);
         self.write_delay = if apu_cycle { 3 } else { 4 };
         self.irq_inhibit = value & 0x40 != 0;
@@ -713,6 +728,11 @@ impl APU {
             mix_cache: 0.0,
             mix_dirty: true
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.write_register(0x4015, 0x00);
+        self.frame_counter.reset();
     }
 
     pub fn set_rate_adjust(&mut self, ratio: f64) {
@@ -1150,5 +1170,23 @@ mod test {
         }
         assert!(!apu.irq_pending());
         assert_eq!(apu.read_status() & 0x10, 0x10, "still playing");
+    }
+
+    #[test]
+    fn test_reset_silences_channels_and_restarts_frame_counter() {
+        let mut apu = APU::new(44100);
+        write_frame_counter(&mut apu, 0x00);
+        apu.write_register(0x4015, 0x0F);
+        apu.write_register(0x4003, 0x08); // length 254
+        run(&mut apu, 30000);
+        assert!(apu.irq_pending());
+        assert_eq!(apu.read_status() & 0x01, 0x01);
+
+        apu.reset();
+        assert!(!apu.irq_pending(), "the frame IRQ flag is cleared");
+        assert_eq!(apu.read_status() & 0x0F, 0, "$4015 is cleared");
+        // $4017 = $00 was rewritten, so the IRQ comes back a sequence later
+        run(&mut apu, 29831);
+        assert!(apu.irq_pending());
     }
 }

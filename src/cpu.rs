@@ -40,6 +40,7 @@ pub struct CPU<'a> {
     /// CPU cycles the current instruction takes, including any page-cross or
     /// branch-taken extras discovered while running it.
     cycles: u8,
+    reset_pending: bool
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +217,7 @@ impl<'a> CPU<'a> {
             status: CpuFlags::from_bits_truncate(0b100100),
             bus: bus,
             cycles: 0,
+            reset_pending: false
         }
     }
 
@@ -674,6 +676,8 @@ impl<'a> CPU<'a> {
         if condition {
             self.cycles += 1;
 
+            self.bus.ignore_new_irq();
+
             let next = self.program_counter.wrapping_add(1);
             let jump_addr = next.wrapping_add(jump as u16);
             self.mem_read(next);
@@ -699,12 +703,6 @@ impl<'a> CPU<'a> {
             self.mem_read(self.program_counter);
         }
         self.stack_push_u16(self.program_counter);
-        let mut flag = self.status.clone();
-        flag.set(CpuFlags::BREAK, interrupt.b_flag_mask & 0b010000 != 0);
-        flag.set(CpuFlags::BREAK2, interrupt.b_flag_mask & 0b100000 != 0);
-
-        self.stack_push(flag.bits);
-        self.status.insert(CpuFlags::INTERRUPT_DISABLE);
 
         // an NMI that arrives while an IRQ or BRK is pushing takes over its
         // vector fetch (the pushed B flag still says which it was)
@@ -713,7 +711,16 @@ impl<'a> CPU<'a> {
         } else {
             interrupt.vector_addr
         };
+
+        let mut flag = self.status.clone();
+        flag.set(CpuFlags::BREAK, interrupt.b_flag_mask & 0b010000 != 0);
+        flag.set(CpuFlags::BREAK2, interrupt.b_flag_mask & 0b100000 != 0);
+
+        self.stack_push(flag.bits);
+        self.status.insert(CpuFlags::INTERRUPT_DISABLE);
         self.program_counter = self.mem_read_u16(vector_addr);
+
+        self.bus.defer_interrupt_poll();
     }
 
     pub fn run(&mut self) {
@@ -727,6 +734,9 @@ impl<'a> CPU<'a> {
         F: FnMut(&mut CPU),
     {
         loop {
+            if self.reset_pending {
+                self.soft_reset();
+            }
             self.service_interrupts();
             callback(self);
             self.execute_instruction();
@@ -734,8 +744,31 @@ impl<'a> CPU<'a> {
     }
 
     pub fn step(&mut self) {
+        if self.reset_pending {
+            self.soft_reset();
+        }
         self.service_interrupts();
         self.execute_instruction();
+    }
+
+    pub fn request_reset(&mut self) {
+        self.reset_pending = true;
+    }
+
+    fn soft_reset(&mut self) {
+        self.reset_pending = false;
+        self.bus.reset();
+        self.cycles = 7;
+        self.mem_read(self.program_counter);
+        self.mem_read(self.program_counter);
+        for _ in 0..3 {
+            self.stack_dummy_read();
+            self.stack_pointer = self.stack_pointer.wrapping_sub(1);
+        }
+        self.status.insert(CpuFlags::INTERRUPT_DISABLE);
+        self.program_counter = self.mem_read_u16(0xFFFC);
+        self.bus.finish_instruction(self.cycles);
+        self.bus.defer_interrupt_poll();
     }
 
     /// Takes a pending NMI or IRQ before the next instruction. The bus says
@@ -953,7 +986,7 @@ impl<'a> CPU<'a> {
                 let lo = self.mem_read(self.program_counter) as u16;
                 self.stack_dummy_read();
                 self.stack_push_u16(self.program_counter.wrapping_add(1));
-                let hi = self.mem_read_u16(self.program_counter.wrapping_add(1)) as u16;
+                let hi = self.mem_read(self.program_counter.wrapping_add(1)) as u16;
                 self.program_counter = hi << 8 | lo
             }
 
@@ -1481,5 +1514,34 @@ mod test {
         // the dummy read loaded $2100 into the read buffer, so this read
         // returns it (without it, the buffer would still be empty)
         assert_eq!(cpu.register_a, 0x11);
+    }
+
+    #[test]
+    fn test_reset_button() {
+        let mut program = vec![
+            0xA9, 0x42, // LDA #$42
+            0xA2, 0x17, // LDX #$17
+            0xA0, 0x99, // LDY #$99
+            0x58, // CLI
+            0x4C, 0x07, 0x80, // JMP $8007
+        ];
+        program.resize(0x8000, 0xEA);
+        program[0x7FFC] = 0x00; // reset vector -> $9000 (a NOP)
+        program[0x7FFD] = 0x90;
+        let mut cpu = cpu_with_program(program);
+        cpu.mem_write(0x0300, 0x55);
+        cpu.mem_write(0x01FD, 0xAA);
+        run_steps(&mut cpu, 6);
+        let sp = cpu.stack_pointer;
+        assert!(!cpu.status.contains(CpuFlags::INTERRUPT_DISABLE));
+
+        cpu.request_reset();
+        cpu.step(); // reset sequence, then the NOP at $9000
+        assert_eq!(cpu.program_counter, 0x9001);
+        assert_eq!((cpu.register_a, cpu.register_x, cpu.register_y), (0x42, 0x17, 0x99));
+        assert_eq!(cpu.stack_pointer, sp.wrapping_sub(3), "S drops by 3");
+        assert!(cpu.status.contains(CpuFlags::INTERRUPT_DISABLE));
+        assert_eq!(cpu.mem_read(0x0300), 0x55, "RAM is kept");
+        assert_eq!(cpu.mem_read(0x01FD), 0xAA, "nothing is pushed");
     }
 }

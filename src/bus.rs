@@ -126,6 +126,18 @@ impl<'a> Bus<'a> {
         self.audio_callback = Some(Box::new(callback));
     }
 
+    pub fn reset(&mut self) {
+        self.apu.reset();
+        self.ppu.reset();
+        self.need_halt = false;
+        self.need_dummy_read = false;
+        self.dmc_dma_running = false;
+        self.oam_dma_page = None;
+        self.need_nmi = false;
+        self.prev_need_nmi = false;
+        self.instruction_cycles = 0;
+    }
+
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
         self.cpu_divider = region.cpu_divider() as u64;
@@ -345,6 +357,17 @@ impl<'a> Bus<'a> {
 
     pub fn hijack_nmi(&mut self) -> bool {
         std::mem::take(&mut self.need_nmi)
+    }
+
+    pub fn defer_interrupt_poll(&mut self) {
+        self.prev_need_nmi = false;
+        self.prev_run_irq = false;
+    }
+
+    pub fn ignore_new_irq(&mut self) {
+        if self.run_irq && !self.prev_run_irq {
+            self.run_irq = false;
+        }
     }
 
     pub fn irq_ready(&self) -> bool {
