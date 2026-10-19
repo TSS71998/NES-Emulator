@@ -11,7 +11,8 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
 - **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
-- **Reset button**: `Ctrl+R` resets the console like the button on the front of a NES.
+- **Two players, keyboard or gamepad**: each player has their own keys, and any gamepad SDL supports (Xbox, PlayStation, Switch and most others) works too, plugged in before or while a game runs.
+- **Reset button**: `Ctrl+R` resets the console. It behaves like a front-loading NES by default, or like a top-loading NES or a Famicom with `--console` (Japanese ROMs pick Famicom automatically).
 - **ROM formats**: iNES, NES 2.0 and archaic iNES headers.
 - **TV-style picture**: the 8-pixel border a TV hides is cropped on every side, showing 240×224.
 
@@ -31,7 +32,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - Scrolling uses the real internal registers (loopy `v`, `t`, `x` and `w`), so mid-line changes to scroll, CHR banks, palettes or PPUMASK show up on the dot they happen.
 - Sprites: 8×8 and 8×16, 8 per line with the overflow flag set on the exact dot (including its hardware bug), priority, left-column clipping, and sprite-0 hit on the exact pixel. Evaluation starts wherever OAMADDR points; `$2004` reads during rendering return the byte the PPU is working on, and writes skip to the next sprite instead of writing.
 - OAM corruption: if OAMADDR is 8 or more when rendering starts, the OAM row it points to is copied over sprites 0 and 1, as on the 2C02 and Dendy (not PAL).
-- Greyscale and colour emphasis: each PPUMASK tint bit attenuates part of the NTSC colour signal, as on the real chip, with red and green swapped on PAL and Dendy.
+- Colours: the palette is decoded from a model of the PPU's composite signal. On PAL and Dendy, whose PPUs mirror the colour phases on alternate lines, the PAL TV's colour reference turns every hue by 15°, so they get their own palette. Greyscale and colour emphasis work too: each PPUMASK tint bit attenuates part of the colour signal, as on the real chip, with red and green swapped on PAL and Dendy.
 - Vblank and NMI timing down to the dot, including the `$2002` read race and the odd-frame dot skip.
 - Open bus: an I/O latch that every register write fills, which write-only registers and undefined bits read back, and whose bits fade after about 600 ms.
 - After reset, writes to `$2000`, `$2001`, `$2005` and `$2006` are ignored until the end of the next vblank, as on a front-loading NES.
@@ -61,6 +62,11 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 - MMC1 ignores a write on the cycle right after another, as the real chip does, so read-modify-write instructions on its registers work.
 - NES 2.0 headers: 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
 
+### Consoles and controllers
+
+- `--console nes|toploader|famicom` picks the console model. Only the front-loading NES (the default) resets the PPU with the reset button. The controller ports' unconnected bits read as open bus where each model leaves them floating, and on the Famicom, `M` speaks into controller 2's microphone (bit 2 of `$4016`). Nothing in a ROM header says Famicom, so ROMs tagged "(J)" or "(Japan)" pick it from the file name.
+- Each controller combines its keys with any number of gamepads. New gamepads go to the player with fewer, and pressing opposite directions together (which a real d-pad can't do, and some games misbehave on) cancels them out.
+
 ### Test ROMs
 
 These pass in full:
@@ -75,10 +81,9 @@ These pass in full:
 
 - **Unsupported mappers.** The emulator exits with a message for mappers other than 0, 1, 2, 3, 4 and 7.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
-- **PAL colours.** PAL uses the NTSC palette, and its emphasis tints come from the NTSC signal model; the PAL PPU's slightly different colours aren't modelled.
+- **PAL colors.** The PAL palette comes from the signal model, not from measurements of a real PAL console, so it may not match one exactly.
 - **Alignment-dependent OAM corruption.** On hardware, toggling rendering mid-line or writing OAMADDR while the PPU is using OAM can corrupt an OAM row, but only on some CPU/PPU clock alignments, which vary from one power-on to the next. This isn't modelled.
-- **Console variants.** Reset behaves like a front-loading NES. On a Famicom or top-loading NES the reset button doesn't reset the PPU.
-- **Not implemented:** keyboard mapping for controller 2.
+- **Other input devices.** Only standard controllers (and the Famicom microphone) are emulated: no Zapper, Power Pad or Famicom expansion-port devices.
 
 ## Building and running
 
@@ -96,23 +101,29 @@ Then from the project folder:
 cargo run --release -- ff.nes          # roms/ff.nes
 cargo run --release -- path/to/game.nes
 cargo run --release -- --region pal "Game (Europe).nes"
+cargo run --release -- --console famicom game.nes
 ```
 
 Pass the ROM to play as an argument. A bare file name is looked up in the current folder, then in `roms/`. With no argument it loads `Alter_Ego.nes`.
 
 Build with `--release`. An unoptimised debug build may not keep up with real time, and then the audio crackles.
 
-## Controls
+ ## Controls 
+| NES button | Player 1 keys | Player 2 keys | Gamepad |
+|------------|---------------|---------------|---------|
+| D-pad      | Arrow keys    | `I` `J` `K` `L` | D-pad or left stick |
+| A          | `A`           | `G`           | Right or top face button (Xbox B/Y) |
+| B          | `S`           | `F`           | Bottom or left face button (Xbox A/X) |
+| Start      | `Enter`       | Right `Shift` | Start |
+| Select     | `Space`       | Right `Ctrl`  | Back / Select |
 
-| NES button | Key        |
-|------------|------------|
-| D-pad      | Arrow keys |
-| A          | `A`        |
-| B          | `S`        |
-| Start      | `Enter`    |
-| Select     | `Space`    |
-| Reset      | `Ctrl+R`   |
-| Quit       | `Esc`      |
+The face buttons go by position, as on an NES pad, where B is to the left of A. The first gamepad plugged in is player 1 and the second player 2.
+
+| Console | Key |
+|---------|-----|
+| Reset | `Ctrl+R` |
+| Famicom microphone (with `--console famicom`) | `M` (hold) |
+| Quit | `Esc` |
 
 ## Tests
 

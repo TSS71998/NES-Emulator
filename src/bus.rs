@@ -3,7 +3,7 @@ use crate::cpu::Mem;
 use crate::joypad::Joypad;
 use crate::mapper::SharedMapper;
 use crate::ppu::NesPPU;
-use crate::region::Region;
+use crate::region::{Region, Console};
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -51,6 +51,7 @@ pub struct Bus<'call> {
 
     cycles: usize,
     region: Region,
+    console: Console,
 
     cpu_divider: u64,
     ppu_divider: u64,
@@ -108,6 +109,7 @@ impl<'a> Bus<'a> {
             prev_run_irq: false,
             irq_mask: true,
             region: Region::Ntsc,
+            console: Console::Nes,
             cpu_divider: Region::Ntsc.cpu_divider() as u64,
             ppu_divider: Region::Ntsc.ppu_divider() as u64,
             read_point: Region::Ntsc.cpu_divider() as u64 / 2 - 1,
@@ -128,7 +130,9 @@ impl<'a> Bus<'a> {
 
     pub fn reset(&mut self) {
         self.apu.reset();
-        self.ppu.reset();
+        if self.console.reset_resets_ppu() {
+            self.ppu.reset();
+        }
         self.need_halt = false;
         self.need_dummy_read = false;
         self.dmc_dma_running = false;
@@ -136,6 +140,20 @@ impl<'a> Bus<'a> {
         self.need_nmi = false;
         self.prev_need_nmi = false;
         self.instruction_cycles = 0;
+    }
+
+    fn controller_read(&mut self, addr: u16) -> u8 {
+        let port = (addr & 1) as usize;
+        let open_bus = self.console.controller_open_bus()[port];
+        let mut value = (self.open_bus & open_bus) | self.joypads[port].read();
+        if addr == 0x4016 && self.console == Console::Famicom && self.joypads[1].microphone {
+            value |= 0x04;
+        }
+        value
+    }
+
+    pub fn set_console(&mut self, console: Console) {
+        self.console = console;
     }
 
     pub fn set_region(&mut self, region: Region) {
@@ -409,8 +427,8 @@ impl Mem for Bus<'_> {
         let value = match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
             0x2000..=0x3FFF => self.ppu.cpu_read(addr & 7),
-            0x4016 => (self.open_bus & 0xE0) | self.joypads[0].read(),
-            0x4017 => (self.open_bus & 0xE0) | self.joypads[1].read(),
+            
+            0x4016 | 0x4017 => self.controller_read(addr),
 
             0x4000..=0x401F => self.open_bus,
 
@@ -512,6 +530,55 @@ mod test {
         bus.mem_write(0x4016, 0);
         assert_eq!(bus.mem_read(0x4016) & 1, 0);
         assert_eq!(bus.mem_read(0x4017) & 1, 1);
+    }
+
+        #[test]
+    fn test_reset_button_resets_the_ppu_only_on_the_front_loader() {
+        for (console, resets) in [
+            (Console::Nes, true),
+            (Console::TopLoader, false),
+            (Console::Famicom, false),
+        ] {
+            let mut bus = test_bus();
+            bus.set_console(console);
+            bus.mem_write(0x2000, 0x80);
+            bus.reset();
+            assert_eq!(bus.ppu.ctrl.bits() == 0, resets, "{:?}", console);
+        }
+    }
+
+    #[test]
+    fn test_controller_open_bus_bits_per_console() {
+        for (console, expected) in [
+            (Console::Nes, [0xE0, 0xE0]),
+            (Console::TopLoader, [0xE4, 0xE0]),
+            (Console::Famicom, [0xF8, 0xE0]),
+        ] {
+            let mut bus = test_bus();
+            bus.set_console(console);
+            bus.mem_write(0x4016, 0); // no buttons: data bit 0 reads 0
+            for (port, addr) in [0x4016u16, 0x4017].into_iter().enumerate() {
+                bus.open_bus = 0xFF;
+                assert_eq!(
+                    bus.mem_read(addr),
+                    expected[port],
+                    "{:?} {:04X}",
+                    console,
+                    addr
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_famicom_microphone() {
+        let mut bus = test_bus();
+        bus.joypads[1].microphone = true;
+        bus.open_bus = 0;
+        assert_eq!(bus.mem_read(0x4016) & 0x04, 0, "only the Famicom has one");
+        bus.set_console(Console::Famicom);
+        assert_eq!(bus.mem_read(0x4016) & 0x04, 0x04);
+        assert_eq!(bus.mem_read(0x4017) & 0x04, 0, "it is read on $4016");
     }
 
     fn cycles_per_frame(region: Region, frames: usize) -> f64 {

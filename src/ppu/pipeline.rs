@@ -10,7 +10,6 @@
 
 use super::{NesPPU, palette_index};
 use crate::region::Region;
-use crate::render::palette::EMPHASIS_PALETTE;
 #[derive(Default)]
 pub(super) struct Background {
     next_tile: u8,
@@ -489,7 +488,7 @@ impl NesPPU {
         let emphasis = self
             .mask
             .emphasise(matches!(self.region, Region::Pal | Region::Dendy));
-        let rgb = EMPHASIS_PALETTE[emphasis << 6 | (color & 0x3F) as usize];
+        let rgb = self.palette[emphasis << 6 | (color & 0x3F) as usize];
         let i = (self.scanline as usize * 256 + x) * 3;
         self.frame.data[i] = rgb.0;
         self.frame.data[i + 1] = rgb.1;
@@ -501,7 +500,7 @@ impl NesPPU {
 mod test {
     use super::*;
     use crate::ppu::PPU;
-    use crate::render::palette::SYSTEM_PALETTE;
+    use crate::render::palette::{SYSTEM_PALETTE, NTSC_PALETTE, PAL_PALETTE};
 
     const RED: u8 = 0x16;
     const GREEN: u8 = 0x2A;
@@ -577,20 +576,20 @@ mod test {
         ppu.write_to_mask(0b0011_1110); // emphasise red
         assert_eq!(
             pixel(&mut ppu, 100, 100),
-            EMPHASIS_PALETTE[1 << 6 | GREEN as usize]
+            NTSC_PALETTE[1 << 6 | GREEN as usize]
         );
         assert_eq!(
             pixel(&mut ppu, 22, 10),
-            EMPHASIS_PALETTE[1 << 6 | RED as usize]
+            NTSC_PALETTE[1 << 6 | RED as usize]
         );
         ppu.write_to_mask(0b1111_1111); // all three, greyscale on
         assert_eq!(
             pixel(&mut ppu, 100, 100),
-            EMPHASIS_PALETTE[7 << 6 | (GREEN & 0x30) as usize]
+            NTSC_PALETTE[7 << 6 | (GREEN & 0x30) as usize]
         );
         // with rendering off the backdrop is tinted too
         ppu.write_to_mask(0b1000_0000);
-        assert_eq!(pixel(&mut ppu, 100, 100), EMPHASIS_PALETTE[4 << 6 | 0x0F]);
+        assert_eq!(pixel(&mut ppu, 100, 100), NTSC_PALETTE[4 << 6 | 0x0F]);
     }
 
     #[test]
@@ -601,12 +600,12 @@ mod test {
         ppu.write_to_mask(0b0011_1110); // bit 5: green on PAL
         assert_eq!(
             pixel(&mut ppu, 100, 100),
-            EMPHASIS_PALETTE[2 << 6 | GREEN as usize]
+            PAL_PALETTE[2 << 6 | GREEN as usize]
         );
         ppu.write_to_mask(0b0101_1110); // bit 6: red on PAL
         assert_eq!(
             pixel(&mut ppu, 100, 100),
-            EMPHASIS_PALETTE[1 << 6 | GREEN as usize]
+            PAL_PALETTE[1 << 6 | GREEN as usize]
         );
     }
 

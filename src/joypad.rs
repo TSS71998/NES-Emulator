@@ -15,6 +15,7 @@ pub struct Joypad {
     strobe: bool,
     button_index: u8,
     button_status: JoypadButton,
+    pub microphone: bool
 }
 
 impl Joypad {
@@ -23,6 +24,7 @@ impl Joypad {
             strobe: false,
             button_index: 0,
             button_status: JoypadButton::from_bits_truncate(0),
+            microphone: false
         }
     }
 
@@ -46,6 +48,10 @@ impl Joypad {
 
     pub fn set_button_pressed_status(&mut self, button: JoypadButton, pressed: bool) {
         self.button_status.set(button, pressed);
+    }
+
+    pub fn set_buttons(&mut self, buttons: JoypadButton) {
+        self.button_status = buttons;
     }
 }
 

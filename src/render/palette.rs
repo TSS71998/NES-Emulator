@@ -1,16 +1,38 @@
 use std::sync::LazyLock;
 
-/// SYSTEM_PALETTE for every combination of PPUMASK's color emphasis bits:
-/// entry `emphasis << 6 | color`, where emphasis bit 0 is red, bit 1 green
-/// and bit 2 blue (PPUMASK bits 5-7 on NTSC). Entries 0-63 are
-/// SYSTEM_PALETTE itself.
-pub static EMPHASIS_PALETTE: LazyLock<[(u8, u8, u8); 512]> = LazyLock::new(|| {
+/// SYSTEM_PALETTE for every combination of PPUMASK's color emphasis bits,
+/// as an NTSC PPU and TV show it: entry `emphasis << 6 | color`, where
+/// emphasis bit 0 is red, bit 1 green and bit 2 blue (PPUMASK bits 5-7 on
+/// NTSC). Entries 0-63 are SYSTEM_PALETTE itself.
+pub static NTSC_PALETTE: LazyLock<[(u8, u8, u8); 512]> =
+    LazyLock::new(|| build_palette(NTSC_HUE_PHASE));
+
+/// The same for the PAL PPU (2C07) and the Dendy's 6538 on a PAL TV. These
+/// draw each color at the same phases as the 2C02, but mirror them on every
+/// other line (pairs 2/3, 1/4, 0/5, B/6, A/7, 9/8), and a PAL TV flips its
+/// V axis every line to match, so the color comes out the same on every
+/// line. What changes is the reference: the TV takes its axes from the two
+/// alternating color bursts, which put the -U axis half a phase (15
+/// degrees) away from where an NTSC TV puts it, so every hue is turned 15
+/// degrees. https://www.nesdev.org/wiki/PAL_video
+pub static PAL_PALETTE: LazyLock<[(u8, u8, u8); 512]> =
+    LazyLock::new(|| build_palette(PAL_HUE_PHASE));
+
+const NTSC_HUE_PHASE: f64 = 3.8;
+
+const PAL_HUE_PHASE: f64 = NTSC_HUE_PHASE + 0.5;
+
+/// SYSTEM_PALETTE plus the change the composite signal model makes for each
+/// emphasis setting, decoded with the given hue alignment. The model's own
+/// NTSC colors are the reference, so NTSC with no emphasis is exactly
+/// SYSTEM_PALETTE.
+fn build_palette(hue_phase: f64) -> [(u8, u8, u8); 512] {
     let mut palette = [(0, 0, 0); 512];
     for color in 0..64 {
-        let plain = ntsc_rgb(color, 0);
+        let plain = composite_rgb(color, 0, NTSC_HUE_PHASE);
         let base = SYSTEM_PALETTE[color];
         for emphasis in 0..8 {
-            let tinted = ntsc_rgb(color, emphasis);
+            let tinted = composite_rgb(color, emphasis, hue_phase);
             let channel = |base: u8, k: usize| {
                 (base as f64 + 255.0 * (tinted[k] - plain[k]))
                     .round()
@@ -21,7 +43,7 @@ pub static EMPHASIS_PALETTE: LazyLock<[(u8, u8, u8); 512]> = LazyLock::new(|| {
         }
     }
     palette
-});
+}
 
 /// The color the 2C02's composite signal decodes to, as RGB from 0 to 1,
 /// following https://www.nesdev.org/wiki/NTSC_video. Each color is a square
@@ -29,13 +51,12 @@ pub static EMPHASIS_PALETTE: LazyLock<[(u8, u8, u8); 512]> = LazyLock::new(|| {
 /// high for the 6 phases matching its hue. Each emphasis bit attenuates the
 /// signal during the 6 phases centred opposite its color, which pulls the
 /// picture towards that color, and all three together darken it evenly.
-fn ntsc_rgb(color: usize, emphasis: usize) -> [f64; 3] {
+fn composite_rgb(color: usize, emphasis: usize, hue_phase: f64) -> [f64; 3] {
     const LOW: [f64; 4] = [0.350, 0.518, 0.962, 1.550];
     const HIGH: [f64; 4] = [1.094, 1.506, 1.962, 1.962];
     const BLACK: f64 = 0.518;
     const WHITE: f64 = 1.962;
     const ATTENUATION: f64 = 0.746;
-    const HUE_PHASE: f64 = 3.8;
 
     let hue = color & 0x0F;
     let level = if hue > 13 { 1 } else { (color >> 4) & 3 };
@@ -59,7 +80,7 @@ fn ntsc_rgb(color: usize, emphasis: usize) -> [f64; 3] {
             signal *= ATTENUATION;
         }
         let signal = (signal - BLACK) / (WHITE - BLACK);
-        let angle = std::f64::consts::PI * (phase as f64 + HUE_PHASE) / 6.0;
+        let angle = std::f64::consts::PI * (phase as f64 + hue_phase) / 6.0;
         y += signal / 12.0;
         i += 2.0 * signal * angle.cos() / 12.0;
         q += 2.0 * signal * angle.sin() / 12.0;
@@ -98,24 +119,24 @@ mod tests {
 
     #[test]
     fn test_no_emphasis_is_the_system_palette() {
-        assert_eq!(EMPHASIS_PALETTE[..64], SYSTEM_PALETTE[..]);
+        assert_eq!(NTSC_PALETTE[..64], SYSTEM_PALETTE[..]);
     }
 
     #[test]
     fn test_each_bit_tints_white_towards_its_colour() {
         let white = 0x30;
-        let (r, g, b) = EMPHASIS_PALETTE[RED << 6 | white];
+        let (r, g, b) = NTSC_PALETTE[RED << 6 | white];
         assert!(r > g + 30 && r > b + 30, "red: {:?}", (r, g, b));
-        let (r, g, b) = EMPHASIS_PALETTE[GREEN << 6 | white];
+        let (r, g, b) = NTSC_PALETTE[GREEN << 6 | white];
         assert!(g > r + 30 && g > b + 30, "green: {:?}", (r, g, b));
-        let (r, g, b) = EMPHASIS_PALETTE[BLUE << 6 | white];
+        let (r, g, b) = NTSC_PALETTE[BLUE << 6 | white];
         assert!(b > r + 30 && b > g + 30, "blue: {:?}", (r, g, b));
     }
 
     #[test]
     fn test_all_bits_darken_grey_evenly() {
         for grey in [0x00, 0x10, 0x20, 0x30] {
-            let (r, g, b) = EMPHASIS_PALETTE[7 << 6 | grey];
+            let (r, g, b) = NTSC_PALETTE[7 << 6 | grey];
             let base = SYSTEM_PALETTE[grey];
             assert!(
                 r < base.0 && g < base.1 && b < base.2,
@@ -132,7 +153,38 @@ mod tests {
     #[test]
     fn test_two_bits_tint_towards_the_mix() {
         // red + green leaves yellow's phases at full strength, so blue drops most
-        let (r, g, b) = EMPHASIS_PALETTE[(RED | GREEN) << 6 | 0x30];
+        let (r, g, b) = NTSC_PALETTE[(RED | GREEN) << 6 | 0x30];
         assert!(b + 30 < r && b + 30 < g, "{:?}", (r, g, b));
+    }
+
+        /// Hue angle of an RGB color, in degrees.
+    fn hue((r, g, b): (u8, u8, u8)) -> f64 {
+        let (r, g, b) = (r as f64, g as f64, b as f64);
+        let u = b - (0.299 * r + 0.587 * g + 0.114 * b);
+        let v = r - (0.299 * r + 0.587 * g + 0.114 * b);
+        v.atan2(u).to_degrees()
+    }
+
+    #[test]
+    fn test_pal_greys_match_ntsc() {
+        // greys have no color signal, so the PAL decoder can't turn them
+        for color in [0x00, 0x10, 0x20, 0x30, 0x0D, 0x0F, 0x1D, 0x2D] {
+            assert_eq!(PAL_PALETTE[color], NTSC_PALETTE[color], "{color:#04x}");
+        }
+    }
+
+    #[test]
+    fn test_pal_turns_hues_back_by_about_15_degrees() {
+        // a turn towards the previous hue: each hue is 30 degrees from the
+        // next, so PAL color $x6 should sit between NTSC $x5 and $x6
+        for color in [0x12, 0x16, 0x1A, 0x22, 0x26, 0x2A] {
+            let ntsc = hue(NTSC_PALETTE[color]);
+            let pal = hue(PAL_PALETTE[color]);
+            let turn = (ntsc - pal + 540.0) % 360.0 - 180.0;
+            assert!(
+                (5.0..25.0).contains(&turn),
+                "{color:#04x}: turned {turn:.1}"
+            );
+        }
     }
 }

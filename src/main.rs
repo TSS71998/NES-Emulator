@@ -4,6 +4,7 @@ pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 pub mod frame_limiter;
+pub mod input;
 pub mod joypad;
 pub mod mapper;
 pub mod opcodes;
@@ -12,21 +13,22 @@ pub mod region;
 pub mod render;
 pub mod trace;
 
+
 use audio::AudioOutput;
 use bus::Bus;
 use cartridge::Rom;
 use cpu::CPU;
+use input::Input;
 use frame_limiter::FrameLimiter;
 use mapper::SharedMapper;
 use ppu::NesPPU;
-use region::Region;
+use region::{Console, Region};
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::rect::Rect;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 #[macro_use]
@@ -53,14 +55,21 @@ fn main() {
         Some(region) => (region, "--region"),
         None => Region::detect(&rom, &file_name),
     };
+    let (console, console_source) = match args.console {
+        Some(console) => (console, "--console"),
+        None => Console::detect(&file_name),
+    };
     println!(
-        "{}: {} ({}), {:.4} fps, CPU {:.6} MHz",
+        "{}: {} ({}), {} ({}), {:.4} fps, CPU {:.6} MHz",
         file_name,
         region.name(),
         region_source,
+        console.name(),
+        console_source,
         region.frames_per_second(),
         region.cpu_clock_hz() / 1e6
     );
+
     let cartridge = mapper::from_rom(rom).unwrap_or_else(|e| exit_with_error(&e));
 
     let sdl_context = sdl2::init().unwrap();
@@ -105,15 +114,11 @@ fn main() {
     }
     let mut saver = BatterySaver::new(cartridge.clone(), save_path);
 
-    let mut key_map = HashMap::new();
-    key_map.insert(Keycode::Down, joypad::JoypadButton::DOWN);
-    key_map.insert(Keycode::Up, joypad::JoypadButton::UP);
-    key_map.insert(Keycode::Right, joypad::JoypadButton::RIGHT);
-    key_map.insert(Keycode::Left, joypad::JoypadButton::LEFT);
-    key_map.insert(Keycode::Space, joypad::JoypadButton::SELECT);
-    key_map.insert(Keycode::Return, joypad::JoypadButton::START);
-    key_map.insert(Keycode::A, joypad::JoypadButton::BUTTON_A);
-    key_map.insert(Keycode::S, joypad::JoypadButton::BUTTON_B);
+    let controllers = sdl_context
+        .game_controller()
+        .map_err(|e| eprintln!("warning: gamepads unavailable: {}", e))
+        .ok();
+    let mut input = Input::new(controllers);
 
     let reset_requested = Rc::new(Cell::new(false));
     let reset_pressed = reset_requested.clone();
@@ -122,7 +127,6 @@ fn main() {
     let mut bus = Bus::new(
         cartridge,
         move |ppu: &NesPPU, joypads: &mut [joypad::Joypad; 2]| {
-            let joypad = &mut joypads[0];
             saver.on_frame();
 
             texture.update(None, &ppu.frame.data, 256 * 3).unwrap();
@@ -157,23 +161,15 @@ fn main() {
                     } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
                         reset_pressed.set(true);
                     }
-                    Event::KeyDown { keycode, .. } => {
-                        if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
-                            joypad.set_button_pressed_status(*key, true);
-                        }
-                    }
-                    Event::KeyUp { keycode, .. } => {
-                        if let Some(key) = key_map.get(&keycode.unwrap_or(Keycode::Ampersand)) {
-                            joypad.set_button_pressed_status(*key, false);
-                        }
-                    }
-                    _ => { /* do nothing */ }
+                    _ => input.handle_event(&event),
                 }
             }
+            input.apply(joypads);
         },
     );
 
     bus.set_region(region);
+    bus.set_console(console);
     bus.set_audio_callback(sample_rate, move |samples: &[f32]| {
         audio_output.push(samples)
     });
@@ -191,31 +187,45 @@ fn main() {
 struct Args {
     rom: String,
     region: Option<Region>,
+    console: Option<Console>
 }
 
 /// `nes_emulator [--region ntsc|pal|dendy] [rom]`
 fn parse_args() -> Args {
     let mut rom = None;
     let mut region = None;
+    let mut console = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        let value = if arg == "--region" {
-            Some(args.next().unwrap_or_default())
-        } else {
-            arg.strip_prefix("--region=").map(str::to_string)
-        };
-        match value {
-            Some(v) => {
-                region = Some(Region::parse(&v).unwrap_or_else(|| {
-                    exit_with_error(&format!("unknown region '{}' (use ntsc, pal or dendy)", v))
-                }))
+        // "--name value" or "--name=value"
+        let mut option = |name: &str| -> Option<String> {
+            if arg == name {
+                Some(args.next().unwrap_or_default())
+            } else {
+                arg.strip_prefix(name)?
+                    .strip_prefix('=')
+                    .map(str::to_string)
             }
-            None => rom = Some(arg),
+        };
+        if let Some(v) = option("--region") {
+            region = Some(Region::parse(&v).unwrap_or_else(|| {
+                exit_with_error(&format!("unknown region '{}' (use ntsc, pal or dendy)", v))
+            }));
+        } else if let Some(v) = option("--console") {
+            console = Some(Console::parse(&v).unwrap_or_else(|| {
+                exit_with_error(&format!(
+                    "unknown console '{}' (use nes, toploader or famicom)",
+                    v
+                ))
+            }));
+        } else {
+            rom = Some(arg);
         }
     }
     Args {
         rom: rom.unwrap_or_else(|| "Alter_Ego.nes".to_string()),
         region,
+        console
     }
 }
 

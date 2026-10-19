@@ -12,6 +12,7 @@ use crate::cartridge::Mirroring;
 use crate::mapper::SharedMapper;
 use crate::region::Region;
 use crate::render::frame::Frame;
+use crate::render::palette::{NTSC_PALETTE, PAL_PALETTE};
 use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
 use registers::status::StatusRegister;
@@ -46,6 +47,7 @@ pub struct NesPPU {
 
     internal_data_buf: u8,
     region: Region,
+    palette: &'static [(u8, u8, u8); 512],
     vblank_line: u16,
     prerender_line: u16,
     lines_per_frame: u16,
@@ -122,6 +124,7 @@ impl NesPPU {
             write_latch: false,
             internal_data_buf: 0,
             region,
+            palette: Self::palette_for(region),
             odd_frame: false,
             last_data_read: None,
             scanline: 0,
@@ -193,6 +196,7 @@ impl NesPPU {
 
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
+        self.palette = Self::palette_for(region);
         self.vblank_line = region.vblank_scanline();
         self.prerender_line = region.prerender_scanline();
         self.lines_per_frame = region.scanlines_per_frame();
@@ -201,6 +205,13 @@ impl NesPPU {
 
     pub fn region(&self) -> Region {
         self.region
+    }
+
+    fn palette_for(region: Region) -> &'static [(u8, u8, u8); 512] {
+        match region {
+            Region::Ntsc => &NTSC_PALETTE,
+            Region::Pal | Region::Dendy => &PAL_PALETTE
+        }
     }
 
     fn rendering_enabled(&self) -> bool {

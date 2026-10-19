@@ -202,6 +202,65 @@ impl Region {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Console {
+    /// The front-loading NES (NES-001), whose reset button resets the PPU
+    /// as well as the CPU.
+    Nes,
+    /// The top-loading NES (NES-101): reset only resets the CPU.
+    TopLoader,
+    /// The Famicom: reset only resets the CPU, and controller 2 has a
+    /// microphone, read on bit 2 of $4016.
+    Famicom
+}
+
+impl Console {
+    pub fn parse(s: &str) -> Option<Console> {
+        match s.to_ascii_lowercase().as_str() {
+            "nes" | "frontloader" | "nes-001" => Some(Console::Nes),
+            "toploader" | "nes-101" => Some(Console::TopLoader),
+            "famicom" | "fc" => Some(Console::Famicom),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Console::Nes => "NES",
+            Console::TopLoader => "top-loading NES",
+            Console::Famicom => "Famicom"
+        }
+    }
+
+    pub fn reset_resets_ppu(self) -> bool {
+        self == Console::Nes
+    }
+
+    /// The bits of a $4016 and a $4017 read that nothing drives, so they
+    /// keep the last value on the data bus (open bus). Bits 5-7 never
+    /// connect; the top-loader also leaves bit 2 of $4016 open, and the
+    /// Famicom bits 3-4 of $4016 (it has no expansion lines there).
+    /// https://www.nesdev.org/wiki/Controller_port_registers
+    pub fn controller_open_bus(self) -> [u8; 2] {
+        match self {
+            Console::Nes => [0xE0, 0xE0],
+            Console::TopLoader => [0xE4, 0xE0],
+            Console::Famicom => [0xF8, 0xE0],
+        }
+    }
+
+    /// Guesses the console from the file name: Japanese releases ("(J)",
+    /// "(Japan)") are Famicom games. Nothing in an iNES or NES 2.0 header
+    /// tells a Famicom cartridge from an NES one.
+    pub fn detect(file_name: &str) -> (Console, &'static str) {
+        let name = file_name.to_ascii_lowercase();
+        if ["(j)", "(japan)"].iter().any(|tag| name.contains(tag)) {
+            return (Console::Famicom, "file name");
+        }
+        (Console::Nes, "default")
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -283,5 +342,25 @@ mod test {
             (Region::Ntsc, "default")
         );
         assert_eq!(Region::detect(&ines, "eagle.nes").0, Region::Ntsc);
+    }
+
+    #[test]
+    fn test_console_parse_and_detect() {
+        assert_eq!(Console::parse("famicom"), Some(Console::Famicom));
+        assert_eq!(Console::parse("TopLoader"), Some(Console::TopLoader));
+        assert_eq!(Console::parse("nes"), Some(Console::Nes));
+        assert_eq!(Console::parse("snes"), None);
+        assert_eq!(
+            Console::detect("Super Mario Bros. 3 (J).nes"),
+            (Console::Famicom, "file name")
+        );
+        assert_eq!(
+            Console::detect("Final Fantasy (Japan).nes").0,
+            Console::Famicom
+        );
+        assert_eq!(
+            Console::detect("Final Fantasy (USA).nes"),
+            (Console::Nes, "default")
+        );
     }
 }
