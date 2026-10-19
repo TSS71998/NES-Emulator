@@ -395,6 +395,12 @@ impl NesPPU {
         }
     }
 
+    /// Updates the I/O latch with the final value of a $2002 read (see
+    /// Bus::cpu_read: the sprite flag bits are sampled late).
+    pub fn refresh_status_latch(&mut self, value: u8) {
+        self.refresh_io_latch(value, 0xE0);
+    }
+
     pub fn reset(&mut self) {
         self.ctrl.update(0);
         self.mask.update(0);
@@ -480,7 +486,8 @@ impl PPU for NesPPU {
     /// the write is lost and OAMADDR moves to the next sprite instead.
     fn write_to_oam_data(&mut self, value: u8) {
         if self.is_rendering() {
-            self.oam_addr = self.oam_addr.wrapping_add(4);
+            // the "glitchy" increment: the next sprite, realigned to byte 0
+            self.oam_addr = self.oam_addr.wrapping_add(4) & 0xFC;
             return;
         }
         self.oam_data[self.oam_addr as usize] = oam_byte(self.oam_addr, value);
@@ -539,10 +546,16 @@ impl PPU for NesPPU {
                 result
             }
             // palette reads aren't buffered, but the buffer is filled with the
-            // nametable byte "underneath" the palette
+            // nametable byte "underneath" the palette. Greyscale applies to
+            // reads too (the stored value keeps its low bits).
             _ => {
                 self.internal_data_buf = self.vram[self.mirror_vram_addr(addr) as usize];
-                self.palette_table[palette_index(addr)]
+                let value = self.palette_table[palette_index(addr)];
+                if self.mask.is_greyscale() {
+                    value & 0x30
+                } else {
+                    value
+                }
             }
         }
     }

@@ -466,3 +466,17 @@ fn test_reset_ignores_some_writes_until_vblank_ends() {
     ppu.cpu_write(0, 0x80);
     assert_eq!(ppu.ctrl.bits(), 0x80);
 }
+
+#[test]
+fn test_palette_reads_honour_greyscale() {
+    let mut ppu = NesPPU::new_empty_rom();
+    set_addr(&mut ppu, 0x3F1C);
+    ppu.write_to_data(0x1A);
+    ppu.write_to_mask(0x01); // greyscale on
+    set_addr(&mut ppu, 0x3F1C);
+    assert_eq!(ppu.read_data(), 0x10, "the low four bits read as 0");
+    ppu.write_to_data(0x16); // writes keep all six bits
+    ppu.write_to_mask(0x00);
+    set_addr(&mut ppu, 0x3F1D);
+    assert_eq!(ppu.read_data(), 0x16);
+}

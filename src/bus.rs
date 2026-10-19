@@ -193,6 +193,20 @@ impl<'a> Bus<'a> {
         self.start_cycle(true);
         let value = self.mem_read(addr);
         self.end_cycle(true);
+        if (0x2000..=0x3FFF).contains(&addr) && addr & 7 == 2 {
+            return self.late_2002_bits(value);
+        }
+        value
+    }
+
+    /// A $2002 read latches the vblank flag when M2 rises (the read point),
+    /// but the sprite 0 hit and overflow flags only when M2 falls, at the end
+    /// of the CPU cycle: about 2 PPU dots later. So those two bits are taken
+    /// from the PPU as it is now.
+    fn late_2002_bits(&mut self, value: u8) -> u8 {
+        let value = (value & !0x60) | (self.ppu.status.snapshot() & 0x60);
+        self.ppu.refresh_status_latch(value);
+        self.open_bus = value;
         value
     }
 
@@ -386,10 +400,12 @@ impl<'a> Bus<'a> {
         self.prev_run_irq = false;
     }
 
-    pub fn ignore_new_irq(&mut self) {
-        if self.run_irq && !self.prev_run_irq {
-            self.run_irq = false;
-        }
+    pub fn irq_poll(&self) -> bool{
+        self.prev_run_irq
+    }
+
+    pub fn set_irq_poll(&mut self, irq: bool) {
+        self.prev_run_irq = irq;
     }
 
     pub fn irq_ready(&self) -> bool {

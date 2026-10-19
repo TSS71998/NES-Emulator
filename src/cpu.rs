@@ -683,7 +683,13 @@ impl<'a> CPU<'a> {
         if condition {
             self.cycles += 1;
 
-            self.bus.ignore_new_irq();
+            // A branch polls for interrupts before its second cycle, like any
+            // 2-cycle instruction, but a taken one doesn't poll again before
+            // its third: an IRQ that arrives in between (even during a DMA
+            // that stalls the third cycle) waits until after the next
+            // instruction. Crossing a page adds a fourth cycle, polled before
+            // as usual, and an IRQ seen by either poll is taken.
+            let first_poll = self.bus.irq_poll();
 
             let next = self.program_counter.wrapping_add(1);
             let jump_addr = next.wrapping_add(jump as u16);
@@ -692,6 +698,10 @@ impl<'a> CPU<'a> {
             if next & 0xFF00 != jump_addr & 0xFF00 {
                 self.cycles += 1;
                 self.mem_read((next & 0xFF00) | (jump_addr & 0x00FF));
+                let last_poll = self.bus.irq_poll();
+                self.bus.set_irq_poll(first_poll || last_poll);
+            } else {
+                self.bus.set_irq_poll(first_poll);
             }
 
             self.program_counter = jump_addr;
