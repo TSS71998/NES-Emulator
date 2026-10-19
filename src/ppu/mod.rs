@@ -64,6 +64,8 @@ pub struct NesPPU {
     /// stops it being set (and the NMI) for that frame.
     suppress_vblank: bool,
     rendering: bool,
+
+    in_reset: bool,
     /// The PPU's /NMI output: vblank flag AND the NMI enable bit. The CPU
     /// detects its rising edge (see Bus).
     nmi_line: bool,
@@ -126,6 +128,7 @@ impl NesPPU {
             dot: 0,
             ppu_cycle: 0,
             suppress_vblank: false,
+            in_reset: false,
             nmi_line: false,
             io_latch: 0,
             io_latch_refreshed: [0; 8],
@@ -269,6 +272,7 @@ impl NesPPU {
                     self.status.set_vblank_status(true);
                 }
             } else if line == prerender {
+                self.in_reset = false;
                 self.status.reset_vblank_status();
                 self.status.set_sprite_zero_hit(false);
                 self.status.set_sprite_overflow(false);
@@ -345,6 +349,9 @@ impl NesPPU {
 
     pub fn cpu_write(&mut self, reg: u16, value: u8) {
         self.refresh_io_latch(value, 0xFF);
+        if self.in_reset && matches!(reg & 7, 0 | 1 | 5 | 6) {
+            return;
+        }
         match reg & 7 {
             0 => self.write_to_ctrl(value),
             1 => self.write_to_mask(value),
@@ -381,6 +388,10 @@ impl NesPPU {
         self.ctrl.update(0);
         self.mask.update(0);
         self.write_latch = false;
+        self.fine_x = 0;
+        self.internal_data_buf = 0;
+        self.odd_frame = false;
+        self.in_reset = true;
         self.update_nmi_line();
     }
 }

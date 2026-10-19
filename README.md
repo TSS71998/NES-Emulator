@@ -6,11 +6,45 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ## Features
 
-- **CPU (6502)**: all official and unofficial opcodes (including the unstable `SHX`/`SHY`/`SHA`/`TAS` stores), passing all of blargg's `instr_test-v5`, `nes_instr_test` and `instr_timing` tests. Cycle counts match the `nestest` reference log, including page-crossing and branch penalties. Every memory access takes its own cycle, and the PPU and APU run up to that point first, so a register read or write lands on the exact PPU dot it would on hardware. NMI and IRQ are polled on an instruction's second-to-last cycle, like the real 6502 (so an IRQ waiting on `CLI` runs after the next instruction), including the edge cases: an NMI arriving during BRK or an IRQ takes over its vector, a handler's first instruction always runs before another interrupt, and a taken branch that doesn't cross a page delays a new IRQ by one instruction (blargg's `cpu_interrupts_v2` passes 5 of 5). The reset button works as on the console: A, X, Y and RAM are kept, S drops by 3, the APU is silenced and its frame counter restarted, and PPUCTRL/PPUMASK are cleared (blargg's `cpu_reset` and `apu_reset` pass). The 6502's dummy accesses happen on the bus too: indexed reads that cross a page first read the wrong address, indexed stores always read before writing, read-modify-write instructions write the old value back before the new one, one-byte instructions read the next byte, indexed zero-page modes read the unindexed address, stack pulls and `JSR` read the stack, `RTS` reads its return address, and taken branches read the next opcode. Games that rely on these side effects on `$2002`, `$2007`, `$4015` or `$4016` behave as on hardware (blargg's `cpu_dummy_reads`, `cpu_dummy_writes` and `instr_misc` pass).
-- **PPU**: dot-accurate. Each of the 341 dots per line does what the real PPU does on it: background tile fetches every 8 dots into shift registers, sprite evaluation for the next line on dots 1–256 (secondary OAM cleared on dots 1–64, then one OAM byte read every other dot), sprite pattern fetches on dots 257–320, and one pixel out per dot. Scrolling uses the real internal registers (loopy `v`, `t`, `x` and `w`), so mid-line changes to scroll, CHR banks, palettes or PPUMASK show up on the dot they happen. Also: 8×8 and 8×16 sprites, 8 sprites per line with the overflow flag set on the exact dot (including its hardware bug), evaluation starting from wherever OAMADDR points, `$2004` reads during rendering returning the byte the PPU is working on, `$2004` writes during rendering skipping to the next sprite instead of writing, sprite priority, left-column clipping, sprite-0 hit on the exact pixel, greyscale, colour emphasis (each PPUMASK tint bit attenuates part of the NTSC colour signal, as on the real chip, with red and green swapped on PAL and Dendy), and vblank/NMI timing down to the dot (including the `$2002` read race and the odd-frame dot skip). The PPU's own open bus is emulated too: an I/O latch that every register write fills, which write-only registers and undefined bits read back, and whose bits fade after about 600 ms. Passes all 10 of blargg's `ppu_vbl_nmi` tests, all 11 `sprite_hit_tests`, all 5 `sprite_overflow_tests`, `ppu_open_bus`, `ppu_read_buffer` and `oam_stress`.
-- **Mapper IRQs**: cartridges see every address the PPU puts on its bus, with the dot it happened on, and can raise the CPU's IRQ line. MMC3 counts rising edges of address line A12 with the chip's filter for short dips, exactly as the hardware does.
-- **APU**: both pulse channels, triangle, noise and DMC, the frame counter (envelopes, sweeps, length counters) with its frame interrupt, the DMC interrupt, the nonlinear mixer and the NES's output filters. Timing is to the CPU cycle: `$4017` writes land 3 or 4 cycles later, length counter writes interact correctly with clocks on the same cycle, and the power-on state matches hardware. Passes all 8 of blargg's `apu_test` and all 11 of his 2005 APU tests.
-- **Regions**: NTSC, PAL and Dendy, with clocks derived exactly from each console's master crystal. DMA works as on hardware: OAM DMA and DMC sample fetches halt the CPU on its next read cycle (repeating that read, side effects and all), then take turns on alternating get/put cycles, so OAM DMA takes 513 or 514 cycles and a DMC fetch 1–4. Passes blargg's `sprdma_and_dmc_dma` and `dmc_dma_during_read4` tests.
+- **Plays most of the NES library**: mappers 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM), which covers games like *Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man* and *Tetris*.
+- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass nearly every one of blargg's hardware test ROMs (see [Technical](#technical)), so games that rely on precise timing work.
+- **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
+- **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
+- **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
+- **Reset button**: `Ctrl+R` resets the console like the button on the front of a NES.
+- **ROM formats**: iNES, NES 2.0 and archaic iNES headers.
+- **TV-style picture**: the 8-pixel border a TV hides is cropped on every side, showing 240×224.
+
+## Technical
+
+### CPU (6502)
+
+- All official and unofficial opcodes, including the unstable `SHX`/`SHY`/`SHA`/`TAS` stores. Cycle counts match the `nestest` reference log, including page-crossing and branch penalties.
+- Every memory access takes its own cycle, and the PPU and APU run up to that point first, so a register read or write lands on the exact PPU dot it would on hardware.
+- The 6502's dummy accesses happen on the bus too: indexed reads that cross a page first read the wrong address, indexed stores always read before writing, read-modify-write instructions write the old value back before the new one, one-byte instructions read the next byte, indexed zero-page modes read the unindexed address, stack pulls and `JSR` read the stack, `RTS` reads its return address, and taken branches read the next opcode. Games that rely on these side effects on `$2002`, `$2007`, `$4015` or `$4016` behave as on hardware.
+- NMI and IRQ are polled on an instruction's second-to-last cycle (so an IRQ waiting on `CLI` runs after the next instruction), with the edge cases: an NMI arriving during BRK or an IRQ takes over its vector, a handler's first instruction always runs before another interrupt, and a taken branch that doesn't cross a page delays a new IRQ by one instruction.
+- Reset works as on a front-loading NES: A, X, Y and RAM are kept, S drops by 3, the APU is silenced and its frame counter restarted, and the PPU is reset too (see below).
+
+### PPU
+
+- Dot-accurate: each of the 341 dots per line does what the real PPU does on it. Background tiles are fetched every 8 dots into shift registers; sprites for the next line are evaluated on dots 1–256 (secondary OAM cleared on dots 1–64, then one OAM byte read every other dot) and their patterns fetched on dots 257–320; one pixel comes out per dot.
+- Scrolling uses the real internal registers (loopy `v`, `t`, `x` and `w`), so mid-line changes to scroll, CHR banks, palettes or PPUMASK show up on the dot they happen.
+- Sprites: 8×8 and 8×16, 8 per line with the overflow flag set on the exact dot (including its hardware bug), priority, left-column clipping, and sprite-0 hit on the exact pixel. Evaluation starts wherever OAMADDR points; `$2004` reads during rendering return the byte the PPU is working on, and writes skip to the next sprite instead of writing.
+- OAM corruption: if OAMADDR is 8 or more when rendering starts, the OAM row it points to is copied over sprites 0 and 1, as on the 2C02 and Dendy (not PAL).
+- Greyscale and colour emphasis: each PPUMASK tint bit attenuates part of the NTSC colour signal, as on the real chip, with red and green swapped on PAL and Dendy.
+- Vblank and NMI timing down to the dot, including the `$2002` read race and the odd-frame dot skip.
+- Open bus: an I/O latch that every register write fills, which write-only registers and undefined bits read back, and whose bits fade after about 600 ms.
+- After reset, writes to `$2000`, `$2001`, `$2005` and `$2006` are ignored until the end of the next vblank, as on a front-loading NES.
+
+### APU
+
+- Both pulse channels, triangle, noise and DMC, the frame counter (envelopes, sweeps, length counters) with its frame interrupt, the DMC interrupt, the nonlinear mixer and the NES's output filters.
+- Timing is to the CPU cycle: `$4017` writes land 3 or 4 cycles later, length counter writes interact correctly with clocks on the same cycle, and the power-on state matches hardware.
+- Audio sync: dynamic rate control keeps about 25 ms of audio buffered, which avoids crackles from the sound card's clock drifting against the system clock.
+
+### DMA and regions
+- OAM DMA and DMC sample fetches halt the CPU on its next read cycle (repeating that read, side effects and all), then take turns on alternating get/put cycles, so OAM DMA takes 513 or 514 cycles and a DMC fetch 1–4.
+- Clocks are derived exactly from each console's master crystal:
 
   | | NTSC | PAL | Dendy |
   |---|---|---|---|
@@ -20,21 +54,31 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
   | Odd-frame dot skip | yes | no | no |
   | APU noise/DMC/frame sequencer tables | NTSC | PAL | NTSC |
   | Frame rate | 60.0988 | 50.0070 | 50.0070 |
-- **Audio sync**: dynamic rate control keeps about 25 ms of audio buffered. This avoids crackles from the sound card's clock drifting against the system clock.
-- **ROM loading**: iNES, NES 2.0 and archaic iNES headers. This includes 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
-- **Mappers**: 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM). Together these cover most of the NES library. MMC1 ignores a write on the cycle right after another, as the real chip does, so read-modify-write instructions on its registers work. MMC3 passes blargg's `mmc3_test_2` tests 1–5, including `4-scanline_timing` (IRQ timing to the PPU dot), and 6 for boards marked as MMC3A in a NES 2.0 header.
-- **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
-- **Input**: keyboard as controller 1. The bus emulates both controller ports.
-- **Display**: the 8-pixel border a TV hides is cropped on every side (`OVERSCAN_LINES` and `OVERSCAN_COLUMNS` in `main.rs`), showing 240×224. Without the side crop, games that clip the left column (such as *Super Mario Bros. 3*) show an 8-pixel strip of the background colour at the left, as real hardware does.
+
+### Mappers and ROMs
+
+- Cartridges see every address the PPU puts on its bus, with the dot it happened on, and can raise the CPU's IRQ line. MMC3 counts rising edges of address line A12 with the chip's filter for short dips, exactly as the hardware does.
+- MMC1 ignores a write on the cycle right after another, as the real chip does, so read-modify-write instructions on its registers work.
+- NES 2.0 headers: 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
+
+### Test ROMs
+
+These pass in full:
+
+- **CPU**: blargg's `instr_test-v5`, `nes_instr_test`, `instr_timing`, `instr_misc`, `cpu_interrupts_v2`, `cpu_dummy_reads`, `cpu_dummy_writes`, `cpu_exec_space` and `cpu_reset`
+- **PPU**: `ppu_vbl_nmi`, `sprite_hit_tests`, `sprite_overflow_tests`, `ppu_open_bus`, `ppu_read_buffer`, `oam_read` and `oam_stress`
+- **APU**: `apu_test`, the 2005 APU tests, `pal_apu_tests` and `apu_reset`
+- **DMA**: `sprdma_and_dmc_dma` and `dmc_dma_during_read4`
+- **Mappers**: `mmc3_test_2` tests 1–5 (and 6 for boards marked as MMC3A in a NES 2.0 header)
 
 ## Limitations
 
 - **Unsupported mappers.** The emulator exits with a message for mappers other than 0, 1, 2, 3, 4 and 7.
-- **OAM corruption.** Real 2C02s corrupt part of OAM when rendering is turned off in the middle of a line, or when OAMADDR is 8 or more as rendering starts; neither is modelled.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **PAL colours.** PAL uses the NTSC palette, and its emphasis tints come from the NTSC signal model; the PAL PPU's slightly different colours aren't modelled.
+- **Alignment-dependent OAM corruption.** On hardware, toggling rendering mid-line or writing OAMADDR while the PPU is using OAM can corrupt an OAM row, but only on some CPU/PPU clock alignments, which vary from one power-on to the next. This isn't modelled.
+- **Console variants.** Reset behaves like a front-loading NES. On a Famicom or top-loading NES the reset button doesn't reset the PPU.
 - **Not implemented:** keyboard mapping for controller 2.
-- **PPU after reset.** On a front-loading NES the PPU ignores writes to some registers until the end of the first frame after reset; that isn't modelled (the Famicom doesn't do it either).
 
 ## Building and running
 

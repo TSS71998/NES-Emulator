@@ -435,3 +435,34 @@ fn test_a12_rises_on_pal_prerender_line() {
     run_frame(&mut ppu);
     assert_eq!(cart.borrow().scanlines, 241);
 }
+
+#[test]
+fn test_reset_ignores_some_writes_until_vblank_ends() {
+    let mut ppu = NesPPU::new_empty_rom();
+    ppu.cpu_write(0, 0x80);
+    ppu.cpu_write(1, 0x1E);
+    ppu.reset();
+    assert_eq!(ppu.ctrl.bits(), 0);
+    assert_eq!(ppu.mask.bits(), 0);
+
+    // $2000, $2001, $2005 and $2006 are ignored...
+    ppu.cpu_write(0, 0x80);
+    ppu.cpu_write(1, 0x1E);
+    ppu.cpu_write(6, 0x21);
+    assert_eq!((ppu.ctrl.bits(), ppu.mask.bits()), (0, 0));
+    assert!(!ppu.write_latch, "the write toggle doesn't flip");
+    // ...but $2003, $2004 and $2007 work
+    ppu.cpu_write(3, 0x10);
+    ppu.cpu_write(4, 0xAB);
+    assert_eq!(ppu.oam_data[0x10], 0xAB);
+    let addr = ppu.vram_addr();
+    ppu.cpu_write(7, 0x55);
+    assert_ne!(ppu.vram_addr(), addr);
+
+    // the reset signal clears at dot 1 of the pre-render line
+    while !(ppu.scanline == ppu.prerender_line && ppu.dot == 1) {
+        ppu.tick(1);
+    }
+    ppu.cpu_write(0, 0x80);
+    assert_eq!(ppu.ctrl.bits(), 0x80);
+}

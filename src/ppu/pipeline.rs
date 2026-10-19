@@ -83,6 +83,16 @@ impl NesPPU {
             return;
         }
 
+        if !visible && (1..=8).contains(&dot) && self.oam_addr >= 8 && self.region != Region::Pal {
+            // The 2C02 bug: when rendering starts, the OAM row (8 bytes)
+            // OAMADDR points to is copied over row 0, so if OAMADDR is 8 or
+            // more, sprites 0 and 1 are overwritten. Reliable on the common
+            // 2C02 revisions (C, E, G, H) and the Dendy; the PAL 2C07
+            // doesn't do it.
+            let i = dot as usize - 1;
+            self.oam_data[i] = self.oam_data[(self.oam_addr & 0xF8) as usize + i];
+        }
+
         // the shifters move on dots 2-257 and 322-337
         if (2..=257).contains(&dot) || (322..=337).contains(&dot) {
             self.shift_background();
@@ -724,6 +734,41 @@ mod test {
         assert_eq!(ppu.read_oam_data(), 49);
         ppu.write_to_oam_data(0x77);
         assert_eq!(ppu.oam_data[0], 0x77);
+    }
+
+    fn numbered_oam(ppu: &mut NesPPU) {
+        for i in 0..256 {
+            ppu.oam_data[i] = i as u8;
+        }
+    }
+
+    #[test]
+    fn test_oamaddr_of_8_or_more_when_rendering_starts_copies_a_row() {
+        let mut ppu = test_ppu();
+        run_frame(&mut ppu);
+        numbered_oam(&mut ppu);
+        run_to(&mut ppu, 245, 0);
+        ppu.oam_addr = 0x2B; // left there by the CPU during vblank
+        let prerender = ppu.prerender_line;
+        run_to(&mut ppu, prerender, 9);
+        let expected: Vec<u8> = (0x28..0x30).collect();
+        assert_eq!(
+            ppu.oam_data[0..8],
+            expected[..],
+            "bytes $28-$2F copied to 0-7"
+        );
+        assert_eq!(ppu.oam_data[8], 8, "nothing else changes");
+
+        // the PAL PPU doesn't have the bug
+        let mut ppu = test_ppu();
+        ppu.set_region(Region::Pal);
+        run_frame(&mut ppu);
+        numbered_oam(&mut ppu);
+        run_to(&mut ppu, 245, 0);
+        ppu.oam_addr = 0x2B;
+        let prerender = ppu.prerender_line;
+        run_to(&mut ppu, prerender, 9);
+        assert_eq!(ppu.oam_data[0], 0);
     }
 
     #[test]
