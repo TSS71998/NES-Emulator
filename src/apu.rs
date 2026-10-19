@@ -365,6 +365,9 @@ struct Dmc {
     irq_flag: bool,
     /// CPU cycles until a sample started by $4015 asks for its first byte.
     start_delay: u8,
+    disable_delay: u8,
+    stop_dma: bool,
+    reloaded: bool
 }
 
 impl Dmc {
@@ -385,6 +388,9 @@ impl Dmc {
             silence: true,
             irq_flag: false,
             start_delay: 0,
+            disable_delay: 0,
+            stop_dma: false,
+            reloaded: false
         }
     }
 
@@ -395,6 +401,10 @@ impl Dmc {
         }
         self.loop_flag = value & 0x40 != 0;
         self.rate = rates[(value & 0x0F) as usize];
+
+        if self.reloaded {
+            self.timer = self.rate - 1;
+        }
     }
 
     fn write_direct_load(&mut self, value: u8) {
@@ -414,12 +424,30 @@ impl Dmc {
         self.bytes_remaining = self.sample_len;
     }
 
+    /// A $4015 write. Turning the DMC off takes 2 or 3 cycles (1 APU cycle
+    /// plus alignment), and a fetch that starts in that time gets aborted.
     fn set_enabled(&mut self, enabled: bool, even_cycle: bool) {
         if !enabled {
-            self.bytes_remaining = 0;
+            if self.disable_delay == 0 {
+                self.disable_delay = if even_cycle { 2 } else { 3 };
+            }
         } else if self.bytes_remaining == 0 {
             self.restart();
             self.start_delay = if even_cycle { 2 } else { 3 };
+        }
+    }
+
+    /// Runs the delayed $4015 writes; called once per CPU cycle.
+    fn clock_delays(&mut self) {
+        if self.disable_delay > 0 {
+            self.disable_delay -= 1;
+            if self.disable_delay == 0 {
+                self.bytes_remaining = 0;
+                self.stop_dma = true;
+            }
+        }
+        if self.start_delay > 0 {
+            self.start_delay -= 1;
         }
     }
 
@@ -432,6 +460,10 @@ impl Dmc {
     }
 
     fn provide_byte(&mut self, byte: u8) {
+        if self.bytes_remaining == 0 {
+            return;
+        }
+
         self.sample_buffer = Some(byte);
         self.current_addr = if self.current_addr == 0xffff {
             0x8000
@@ -446,10 +478,20 @@ impl Dmc {
                 self.irq_flag = true;
             }
         }
+
+        // Implicit abort: when the last byte of a 1-byte sample arrives just
+        // before the output unit finishes its byte, the output unit takes
+        // the new byte at once and asks for another one, which the DMA unit
+        // starts and then drops: one halted CPU cycle. (Follows Mesen.)
+        if self.sample_len == 1 && !self.loop_flag && self.bits_remaining == 1 && self.timer < 2 {
+            self.restart();
+            self.disable_delay = 3;
+        }
     }
 
     #[inline]
     fn clock_timer(&mut self) -> bool {
+        self.reloaded = self.timer == 0;
         if self.timer > 0 {
             self.timer -= 1;
             return false;
@@ -562,6 +604,7 @@ struct FrameCounter {
     /// whether it lands on an APU cycle (every other CPU cycle).
     pending_write: Option<u8>,
     write_delay: u8,
+    clear_delay: u8,
     /// A clock from the sequence and one from a 5-step-mode write landing
     /// within two cycles of each other only clock the units once.
     block_clocks: u8,
@@ -582,6 +625,7 @@ impl FrameCounter {
             irq_flag: false,
             pending_write: None,
             write_delay: 0,
+            clear_delay: 0,
             block_clocks: 0,
             last_write: 0,
         };
@@ -634,10 +678,19 @@ impl FrameCounter {
 
     fn tick(&mut self) -> FrameClock {
         let mut clock = FrameClock::None;
+        if self.clear_delay > 0 {
+            self.clear_delay -= 1;
+            if self.clear_delay == 0 {
+                self.irq_flag = false;
+            }
+        }
         self.cycle += 1;
         if self.cycle == self.steps[self.mode][self.step] {
-            if self.mode == 0 && self.step >= 3 && !self.irq_inhibit {
-                self.irq_flag = true;
+            // The 4-step sequence sets the flag on its last three cycles.
+            // With interrupts inhibited it is still set on the first two,
+            // where $4015 can see it, and cleared on the third.
+            if self.mode == 0 && self.step >= 3 {
+                self.irq_flag = !(self.irq_inhibit && self.step == 5);
             }
             let step_clock = FRAME_CLOCKS[self.step];
             if step_clock != FrameClock::None && self.block_clocks == 0 {
@@ -746,6 +799,8 @@ impl APU {
     pub fn reset(&mut self) {
         self.write_register(0x4015, 0x00);
         self.frame_counter.reset();
+        self.dmc.bytes_remaining = 0;
+        self.dmc.disable_delay = 0;
     }
 
     pub fn set_rate_adjust(&mut self, ratio: f64) {
@@ -829,15 +884,33 @@ impl APU {
         if self.frame_counter.irq_flag {
             status |= 0x40;
         }
+        // the read clears the frame flag at the next put-to-get transition:
+        // 1 cycle away on a put cycle, 2 on a get cycle
+        if self.frame_counter.clear_delay == 0 {
+            self.frame_counter.clear_delay = if self.get_cycle() { 2 } else { 1 };
+        }
         if self.dmc.irq_flag {
             status |= 0x80;
         }
-        self.frame_counter.irq_flag = false;
         status
     }
 
+    /// Whether the current CPU cycle is a "get" cycle, the first half of an
+    /// APU cycle (the DMA unit reads on these; see Bus::run_dma).
+    fn get_cycle(&self) -> bool {
+        self.odd_cycle
+    }
+
     pub fn irq_pending(&self) -> bool {
-        self.frame_counter.irq_flag || self.dmc.irq_flag
+        (self.frame_counter.irq_flag && !self.frame_counter.irq_inhibit) || self.dmc.irq_flag
+    }
+
+    pub fn take_dmc_stop(&mut self) -> bool {
+        std::mem::take(&mut self.dmc.stop_dma)
+    }
+
+    pub fn dmc_addr(&mut self) -> u16 {
+        self.dmc.current_addr
     }
 
     pub fn dmc_fetch_addr(&self) -> Option<u16> {
@@ -897,9 +970,7 @@ impl APU {
 
     pub fn tick(&mut self) {
         self.clock_frame_sequencer();
-        if self.dmc.start_delay > 0 {
-            self.dmc.start_delay -= 1;
-        }
+        self.dmc.clock_delays();
 
         let mut changed = self.triangle.clock_timer();
         changed |= self.noise.clock_timer();
@@ -1100,6 +1171,7 @@ mod test {
         run(&mut apu, 5);
         assert!(apu.irq_pending());
         assert_eq!(apu.read_status() & 0x40, 0x40);
+        run(&mut apu, 2);
         assert!(!apu.irq_pending(), "reading $4015 acknowledges it");
         assert_eq!(apu.read_status() & 0x40, 0);
     }
@@ -1208,5 +1280,73 @@ mod test {
         // $4017 = $00 was rewritten, so the IRQ comes back a sequence later
         run(&mut apu, 29831);
         assert!(apu.irq_pending());
+    }
+
+        #[test]
+    fn test_dmc_turns_off_two_or_three_cycles_after_the_write() {
+        let mut apu = APU::new(44100);
+        apu.write_register(0x4013, 0x01); // 17 bytes
+        apu.write_register(0x4015, 0x10);
+        apu.write_register(0x4015, 0x00);
+        assert_eq!(apu.read_status() & 0x10, 0x10, "still playing");
+        let mut cycles = 0;
+        while !apu.take_dmc_stop() {
+            apu.tick();
+            cycles += 1;
+        }
+        assert!(cycles == 2 || cycles == 3, "took {}", cycles);
+        assert_eq!(apu.read_status() & 0x10, 0);
+    }
+
+    #[test]
+    fn test_dmc_rate_written_as_the_timer_reloads_is_used_at_once() {
+        let rates = Region::Ntsc.dmc_rates();
+        for (wait, expected) in [(0, rates[0] - 1), (1, rates[15] - 2)] {
+            let mut apu = APU::new(44100);
+            apu.write_register(0x4010, 0x0F); // fastest rate
+            apu.dmc.timer = 0;
+            apu.tick(); // reloads with the fastest rate
+            for _ in 0..wait {
+                apu.tick();
+            }
+            apu.write_register(0x4010, 0x00); // slowest rate
+            assert_eq!(apu.dmc.timer, expected, "written {} cycles later", wait);
+        }
+    }
+
+    #[test]
+    fn test_frame_irq_clear_waits_for_a_get_cycle() {
+        // a read on a get cycle clears the flag 2 cycles later, on a put
+        // cycle 1 cycle later
+        for extra in 0..2 {
+            let mut apu = APU::new(44100);
+            write_frame_counter(&mut apu, 0x00);
+            run(&mut apu, 29840 + extra);
+            let delay = if apu.get_cycle() { 2 } else { 1 };
+            apu.read_status();
+            for _ in 1..delay {
+                apu.tick();
+                assert!(apu.irq_pending(), "not cleared yet");
+            }
+            apu.tick();
+            assert!(!apu.irq_pending());
+        }
+    }
+
+    #[test]
+    fn test_inhibited_frame_flag_is_seen_but_raises_no_irq() {
+        // with interrupts inhibited the flag is still set for two cycles at
+        // the end of the sequence, but the IRQ line stays low
+        let mut apu = APU::new(44100);
+        write_frame_counter(&mut apu, 0x40);
+        let mut seen = 0;
+        for _ in 0..29840 {
+            apu.tick();
+            assert!(!apu.irq_pending());
+            if apu.frame_counter.irq_flag {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 2);
     }
 }

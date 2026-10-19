@@ -48,6 +48,16 @@ pub struct Bus<'call> {
     // Last value driven on the CPU data bus. Reads from addresses nothing
     // responds to return it ("open bus") instead of panicking.
     open_bus: u8,
+    abort_dmc_dma: bool,
+    // The 2A03 has its own internal data bus too, between the CPU, the DMA
+    // unit and the APU/controller registers. It follows the external bus,
+    // except that $4015 reads only reach the internal one and DMC fetches
+    // only the external one. Bit 5 of $4015 and the floating bits of the
+    // controller ports read it.
+    internal_bus: u8,
+    /// The last value written to $4016, waiting for the controllers to see
+    /// it (see start_cycle).
+    pending_strobe: Option<u8>,
 
     cycles: usize,
     region: Region,
@@ -98,6 +108,9 @@ impl<'a> Bus<'a> {
             oam_dma_page: None,
             dma_joypad_held: false,
             open_bus: 0,
+            abort_dmc_dma: false,
+            internal_bus: 0,
+            pending_strobe: None,
             cycles: 0,
             master_clock: 0,
             ppu_clock: 0,
@@ -140,12 +153,13 @@ impl<'a> Bus<'a> {
         self.need_nmi = false;
         self.prev_need_nmi = false;
         self.instruction_cycles = 0;
+        self.abort_dmc_dma = false;
     }
 
     fn controller_read(&mut self, addr: u16) -> u8 {
         let port = (addr & 1) as usize;
         let open_bus = self.console.controller_open_bus()[port];
-        let mut value = (self.open_bus & open_bus) | self.joypads[port].read();
+        let mut value = (self.internal_bus & open_bus) | self.joypads[port].read();
         if addr == 0x4016 && self.console == Console::Famicom && self.joypads[1].microphone {
             value |= 0x04;
         }
@@ -206,7 +220,7 @@ impl<'a> Bus<'a> {
     fn late_2002_bits(&mut self, value: u8) -> u8 {
         let value = (value & !0x60) | (self.ppu.status.snapshot() & 0x60);
         self.ppu.refresh_status_latch(value);
-        self.open_bus = value;
+        self.internal_bus = value;
         value
     }
 
@@ -254,29 +268,43 @@ impl<'a> Bus<'a> {
     ///   count as its halt and dummy, so it usually adds just 2.
     fn run_dma(&mut self, read_addr: Option<u16>) {
         self.dma_joypad_held = false;
-        self.dma_cycle(|bus| bus.dma_dummy_read(read_addr));
         self.need_halt = false;
+        self.start_cycle(true);
+        if self.abort_dmc_dma {
+            self.abort_dmc_dma = false;
+            self.dmc_dma_running = false;
+            self.need_dummy_read = false;
+            if self.oam_dma_page.is_none() {
+                self.end_cycle(true);
+                return;
+            }
+        }
+        self.dma_dummy_read(read_addr);
+        self.end_cycle(true);
 
         let mut oam_cycles = 0u16;
         let mut oam_low = 0u8;
         let mut oam_value = 0u8;
+        let mut prev_addr = read_addr.unwrap_or(0);
         while self.dmc_dma_running || self.oam_dma_page.is_some() {
             let get_cycle = self.cycles % 2 == 0;
             if get_cycle {
                 if self.dmc_dma_running && !self.need_halt && !self.need_dummy_read {
                     self.dma_cycle(|bus| {
                         bus.dma_joypad_held = false; // the DMA unit takes the bus
-                        if let Some(addr) = bus.apu.dmc_fetch_addr() {
-                            let byte = bus.mem_read(addr);
-                            bus.apu.dmc_provide_byte(byte);
-                        }
+                        let internal = bus.internal_bus;
+                        let addr = bus.apu.dmc_addr();
+                        let byte = bus.dma_read(addr, read_addr, &mut prev_addr);
+                        bus.internal_bus = internal;
+                        bus.apu.dmc_provide_byte(byte);
                     });
                     self.dmc_dma_running = false;
+                    self.abort_dmc_dma = false;
                 } else if let Some(page) = self.oam_dma_page {
                     let addr = (page as u16) << 8 | oam_low as u16;
                     self.dma_cycle(|bus| {
                         bus.dma_joypad_held = false;
-                        oam_value = bus.mem_read(addr);
+                        oam_value = bus.dma_read(addr, read_addr, &mut prev_addr);
                     });
                     oam_low = oam_low.wrapping_add(1);
                     oam_cycles += 1;
@@ -301,7 +329,12 @@ impl<'a> Bus<'a> {
     /// One CPU cycle taken by the DMA unit. A cycle spent on OAM DMA counts
     /// as the DMC's halt or dummy cycle if it needs one.
     fn dma_cycle(&mut self, access: impl FnOnce(&mut Self)) {
-        if self.need_halt {
+        if self.abort_dmc_dma {
+            self.abort_dmc_dma = false;
+            self.dmc_dma_running = false;
+            self.need_halt = false;
+            self.need_dummy_read = false;
+        } else if self.need_halt {
             self.need_halt = false;
         } else if self.need_dummy_read {
             self.need_dummy_read = false;
@@ -324,6 +357,85 @@ impl<'a> Bus<'a> {
         self.dma_joypad_held = joypad;
     }
 
+    /// The DMC was turned off. A fetch the CPU hasn't halted for yet is
+    /// cancelled outright; one under way stops at the start of the next DMA
+    /// cycle (if that's its read cycle, the read still happens, but the
+    /// byte is thrown away). Follows Mesen's NesCpu::StopDmcTransfer.
+    fn stop_dmc_dma(&mut self) {
+        if !self.dmc_dma_running {
+            return;
+        }
+        if self.need_halt {
+            self.dmc_dma_running = false;
+            self.need_halt = self.oam_dma_page.is_some();
+            self.need_dummy_read = false;
+        } else {
+            self.abort_dmc_dma = true;
+        }
+    }
+
+    /// A read by the DMA unit. The 2A03's APU and controller registers only
+    /// answer while the CPU's own address is in $4000-$401F, and then they
+    /// decode just the low 5 bits of the bus address. So:
+    ///
+    /// - if the halted CPU was reading $4000-$401F, a DMA read of any
+    ///   address also reads the internal register at $4000 + (address & $1F):
+    ///   $4015 (clearing the frame interrupt), or a controller port. If RAM,
+    ///   the PPU or the cartridge answers the address as well, the two
+    ///   collide: the port's driven bits win and its floating bits come
+    ///   from the outside value (DMC DMA Bus Conflicts).
+    /// - otherwise nothing answers a DMA read of $4000-$401F: open bus.
+    ///
+    /// `prev_addr` is the last register read, since a second read of the
+    /// same controller port in a row doesn't clock it again (NES only).
+    /// See https://github.com/100thCoin/AccuracyCoin ("APU Register
+    /// Activation") and Mesen's NesCpu::ProcessDmaRead.
+    fn dma_read(&mut self, addr: u16, cpu_addr: Option<u16>, prev_addr: &mut u16) -> u8 {
+        let registers_active = cpu_addr.is_some_and(|a| a & 0xFFE0 == 0x4000);
+        if !registers_active {
+            *prev_addr = addr;
+            if (0x4000..=0x401F).contains(&addr) {
+                self.internal_bus = self.open_bus;
+                return self.open_bus;
+            }
+            return self.mem_read(addr);
+        }
+        let register = 0x4000 | (addr & 0x1F);
+        let driven = register != addr && !(0x4000..0x6000).contains(&addr);
+        let value = match register {
+            0x4015 => {
+                let value = self.mem_read(0x4015);
+                if driven {
+                    let internal = self.internal_bus;
+                    self.mem_read(addr);
+                    self.internal_bus = internal;
+                }
+                value
+            }
+            0x4016 | 0x4017 => {
+                let nes = self.console != Console::Famicom;
+                let value = if self.region == Region::Pal || (nes && *prev_addr == register) {
+                    self.internal_bus
+                } else {
+                    self.controller_read(register)
+                };
+                let value = if driven {
+                    let open = self.console.controller_open_bus()[(register & 1) as usize];
+                    let outside = self.mem_read(addr);
+                    (outside & open) | (value & !open)
+                } else {
+                    value
+                };
+                self.open_bus = value;
+                self.internal_bus = value;
+                value
+            }
+            _ => self.mem_read(addr)
+        };
+        *prev_addr = register;
+        value
+    }
+
     /// Master clock ticks from the start of a CPU cycle to its access. Reads
     /// land a little before the middle of the cycle and writes a little
     /// after (on NTSC 5 and 7 of 12 ticks), as in Mesen.
@@ -338,10 +450,19 @@ impl<'a> Bus<'a> {
 
     fn start_cycle(&mut self, read: bool) {
         self.cycles += 1;
+        if self.cycles % 2 == 0 {
+            if let Some(value) = self.pending_strobe.take() {
+                self.joypads[0].write(value);
+                self.joypads[1].write(value);
+            }
+        }
         self.master_clock += self.access_point(read);
         self.run_ppu();
 
         self.apu.tick();
+        if self.apu.take_dmc_stop() {
+            self.stop_dmc_dma();
+        }
         if !self.dmc_dma_running && self.apu.dmc_fetch_addr().is_some() {
             self.dmc_dma_running = true;
             self.need_halt = true;
@@ -438,7 +559,9 @@ impl<'a> Bus<'a> {
 impl Mem for Bus<'_> {
     fn mem_read(&mut self, addr: u16) -> u8 {
         if addr == 0x4015 {
-            return (self.apu.read_status() & !0x20) | (self.open_bus & 0x20);
+            let value =  (self.apu.read_status() & !0x20) | (self.open_bus & 0x20);
+            self.internal_bus = value;
+            return value;
         }
         let value = match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
@@ -451,11 +574,13 @@ impl Mem for Bus<'_> {
             0x4020..=0xFFFF => self.cartridge_read(addr),
         };
         self.open_bus = value;
+        self.internal_bus = value;
         value
     }
 
     fn mem_write(&mut self, addr: u16, data: u8) {
         self.open_bus = data;
+        self.internal_bus = data;
         match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize] = data,
 
@@ -468,10 +593,7 @@ impl Mem for Bus<'_> {
                 self.need_halt = true;
             }
 
-            0x4016 => {
-                self.joypads[0].write(data);
-                self.joypads[1].write(data);
-            }
+            0x4016 => self.pending_strobe = Some(data),
 
             0x4018..=0x401F => { /* CPU test mode registers */ }
 
@@ -675,5 +797,107 @@ mod test {
         }
         lengths.sort();
         assert_eq!(lengths, vec![513, 514]);
+    }
+
+        #[test]
+    fn test_strobe_reaches_the_controllers_on_a_get_to_put_transition() {
+        use crate::joypad::JoypadButton;
+        // a read-modify-write instruction writes 1 then 0 on back-to-back
+        // cycles: the controllers see the 1 only if it was written on a get
+        // cycle (odd-numbered here), so the next cycle is a put cycle
+        for strobed in [true, false] {
+            let mut bus = test_bus();
+            bus.joypads[0].set_button_pressed_status(JoypadButton::BUTTON_A, true);
+            // read all 8 buttons, so a read returns 1 until strobed again
+            for _ in 0..8 {
+                bus.cpu_read(0x4016);
+            }
+            let get_next = bus.cycles % 2 == 0;
+            if get_next != strobed {
+                bus.idle_cycle();
+            }
+            bus.cpu_write(0x4016, 1);
+            bus.cpu_write(0x4016, 0);
+            bus.idle_cycle();
+            bus.idle_cycle();
+            // strobed: reads restart at A (pressed) then B (not pressed);
+            // not strobed: still past the 8th button, which reads 1
+            assert_eq!(bus.cpu_read(0x4016) & 1, 1);
+            let b = bus.cpu_read(0x4016) & 1;
+            assert_eq!(b, if strobed { 0 } else { 1 }, "strobed: {strobed}");
+        }
+    }
+
+    /// Starts a 17-byte DMC sample and runs until its first fetch is due.
+    fn bus_with_dmc_fetch_due<'a>() -> Bus<'a> {
+        let mut bus = test_bus();
+        bus.cpu_write(0x4013, 0x01);
+        bus.cpu_write(0x4015, 0x10);
+        while !bus.dmc_dma_running {
+            bus.cpu_write(0x0000, 0x00);
+        }
+        bus
+    }
+
+    #[test]
+    fn test_dmc_fetch_takes_three_or_four_cycles() {
+        let mut bus = bus_with_dmc_fetch_due();
+        let start = bus.cpu_cycles();
+        bus.cpu_read(0x0000);
+        let taken = bus.cpu_cycles() - start - 1;
+        assert!(taken == 3 || taken == 4, "took {}", taken);
+    }
+
+    #[test]
+    fn test_dmc_turned_off_before_the_halt_cancels_the_fetch() {
+        let mut bus = bus_with_dmc_fetch_due();
+        // writes can't be halted, so the DMC stops before the CPU does
+        bus.cpu_write(0x4015, 0x00);
+        for _ in 0..3 {
+            bus.cpu_write(0x0000, 0x00);
+        }
+        let start = bus.cpu_cycles();
+        bus.cpu_read(0x0000);
+        assert_eq!(bus.cpu_cycles() - start, 1);
+    }
+
+    #[test]
+    fn test_dmc_turned_off_as_the_fetch_starts_halts_for_one_cycle() {
+        // with the DMC turned off 0-2 cycles before the CPU's read, the
+        // fetch is either cut short after its halt cycle, or completes
+        let mut taken = vec![];
+        for writes in 0..3 {
+            let mut bus = bus_with_dmc_fetch_due();
+            bus.cpu_write(0x4015, 0x00);
+            for _ in 0..writes {
+                bus.cpu_write(0x0000, 0x00);
+            }
+            let start = bus.cpu_cycles();
+            bus.cpu_read(0x0000);
+            taken.push(bus.cpu_cycles() - start - 1);
+        }
+        assert!(taken.contains(&1), "{:?}", taken);
+        assert!(taken.iter().all(|&t| t == 1 || t >= 3), "{:?}", taken);
+    }
+
+    #[test]
+    fn test_dma_read_conflicts_with_a_controller_port() {
+        use crate::joypad::JoypadButton;
+        let mut bus = test_bus();
+        bus.joypads[0].set_button_pressed_status(JoypadButton::BUTTON_A, true);
+        bus.joypads[0].write(1);
+        bus.joypads[0].write(0);
+        // $0016 is RAM, and $4016 answers too while the CPU is at $4000:
+        // the port's bit 0 (A held) wins, its floating bits come from RAM
+        for (ram, expected) in [(0x00, 0x01), (0xFF, 0xE1)] {
+            bus.mem_write(0x0016, ram);
+            let mut prev = 0x4000;
+            assert_eq!(bus.dma_read(0x0016, Some(0x4000), &mut prev), expected);
+            bus.joypads[0].write(1); // A again for the next read
+            bus.joypads[0].write(0);
+        }
+        // with the CPU elsewhere, only RAM answers
+        let mut prev = 0;
+        assert_eq!(bus.dma_read(0x0016, Some(0x0200), &mut prev), 0xFF);
     }
 }

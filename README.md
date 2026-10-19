@@ -7,7 +7,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 ## Features
 
 - **Plays most of the NES library**: mappers 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM), which covers games like *Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man* and *Tetris*.
-- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and 121 of AccuracyCoin's 146 (see [Technical](#technical)), so games that rely on precise timing work.
+- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and 129 of AccuracyCoin's 146 (see [Technical](#technical)), so games that rely on precise timing work.
 - **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
 - **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
@@ -40,11 +40,15 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 ### APU
 
 - Both pulse channels, triangle, noise and DMC, the frame counter (envelopes, sweeps, length counters) with its frame interrupt, the DMC interrupt, the nonlinear mixer and the NES's output filters.
-- Timing is to the CPU cycle: `$4017` writes land 3 or 4 cycles later, length counter writes interact correctly with clocks on the same cycle, and the power-on state matches hardware.
+- Timing is to the CPU cycle: `$4017` writes land 3 or 4 cycles later, a `$4015` read clears the frame interrupt flag 1 or 2 cycles later, length counter writes interact correctly with clocks on the same cycle, a `$4010` rate written on the cycle the DMC timer reloads takes effect at once, and the power-on state matches hardware.
+- The controllers' strobe line follows `$4016` writes only when a get cycle turns into a put cycle, so of two writes on back-to-back cycles the controllers may see only the second.
 - Audio sync: dynamic rate control keeps about 25 ms of audio buffered, which avoids crackles from the sound card's clock drifting against the system clock.
 
 ### DMA and regions
 - OAM DMA and DMC sample fetches halt the CPU on its next read cycle (repeating that read, side effects and all), then take turns on alternating get/put cycles, so OAM DMA takes 513 or 514 cycles and a DMC fetch 1–4.
+- Turning the DMC off takes 2 or 3 cycles, and a fetch that starts in that window is cut short after its halt cycle (an explicit abort); a 1-byte sample can do the same to itself (an implicit abort).
+- The APU and controller registers decode only the low 5 bits of the address and only answer while the CPU's address is in `$4000`–`$401F`. A DMA that halts the CPU there reads them through every `$20` bytes it touches (clearing the frame interrupt, clocking a controller), colliding with RAM, the PPU or the cartridge where those answer too.
+- Two data buses: the CPU's internal bus, which `$4015` and the controllers' floating bits read from, and the external one that open bus reads see. A `$4015` read only reaches the internal one, and a DMC fetch only the external one.
 - Clocks are derived exactly from each console's master crystal:
 
   | | NTSC | PAL | Dendy |
@@ -77,7 +81,7 @@ These pass in full:
 - **DMA**: `sprdma_and_dmc_dma` and `dmc_dma_during_read4`
 - **Mappers**: `mmc3_test_2` tests 1–5 (and 6 for boards marked as MMC3A in a NES 2.0 header)
 
-[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes 121. The rest are the `SHA`/`SHX`/`SHY`/`SHS` stores when DMA lands mid-instruction, finer DMC DMA and APU get/put-cycle details, the second half of `$2002` flag timing, the `$2004`/`$2007` stress tests, OAM corruption, and PPU internals such as stale shift registers and mid-fetch address-bus effects.
+[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes 129. The rest are the `SHA`/`SHX`/`SHY`/`SHS` stores when DMA lands mid-instruction, the second half of `$2002` flag timing, the `$2004`/`$2007` stress tests, OAM corruption, and PPU internals such as stale shift registers and mid-fetch address-bus effects.
 
 ## Limitations
 
