@@ -311,11 +311,16 @@ impl<'a> CPU<'a> {
     /// The unstable stores SHA/AHX, SHX, SHY and TAS write `value & (H + 1)`,
     /// where H is the high byte of the address *before* indexing. If the
     /// index crosses a page, that same value also replaces the high byte of
-    /// the address written to.
+    /// the address written to. If DMA halts the CPU on the cycle before the
+    /// write, the `& (H + 1)` drops out and `value` is written as is.
     fn unstable_store(&mut self, base: u16, index: u8, value: u8) {
         let addr = base.wrapping_add(index as u16);
         self.dummy_read((base & 0xFF00) | (addr & 0x00FF));
-        let data = value & ((base >> 8) as u8).wrapping_add(1);
+        let data = if self.bus.last_read_halted() {
+            value
+        } else {
+            value & ((base >> 8) as u8).wrapping_add(1)
+        };
         let addr = if page_cross(base, addr) {
             (data as u16) << 8 | (addr & 0x00FF)
         } else {
@@ -1577,5 +1582,35 @@ mod test {
         assert!(cpu.status.contains(CpuFlags::INTERRUPT_DISABLE));
         assert_eq!(cpu.mem_read(0x0300), 0x55, "RAM is kept");
         assert_eq!(cpu.mem_read(0x01FD), 0xAA, "nothing is pushed");
+    }
+
+        #[test]
+    fn test_unstable_store_halted_by_dma_skips_the_and_with_h() {
+        // SHX $0200,Y with X = $FF writes X & (2 + 1) = $03, unless a DMC
+        // fetch halts the CPU on the dummy read just before the write:
+        // then it writes X as is. Starting the DMC with a $4015 write right
+        // before SHX makes the fetch halt either its 3rd cycle (the high
+        // byte read) or its 4th (the dummy read), by cycle parity, which an
+        // extra 3-cycle LDA $00 in front flips.
+        let mut results = vec![];
+        for lda_zp in [false, true] {
+            for dmc in [false, true] {
+                let mut program = vec![];
+                if lda_zp {
+                    program.extend([0xA5, 0x00]); // LDA $00
+                }
+                program.extend([0xA9, if dmc { 0x10 } else { 0x00 }]); // LDA #
+                program.extend([0x8D, 0x15, 0x40]); // STA $4015
+                program.extend([0x9E, 0x00, 0x02]); // SHX $0200,Y
+                let mut cpu = cpu_with_program(program);
+                run_steps(&mut cpu, 2 + lda_zp as usize);
+                cpu.register_x = 0xFF;
+                cpu.register_y = 0;
+                cpu.step();
+                results.push(cpu.mem_read(0x0200));
+            }
+        }
+        // without LDA $00 the fetch halts the high byte read, too early
+        assert_eq!(results, [0x03, 0x03, 0x03, 0xFF]);
     }
 }

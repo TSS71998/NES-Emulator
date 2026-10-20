@@ -58,6 +58,7 @@ pub struct Bus<'call> {
     /// The last value written to $4016, waiting for the controllers to see
     /// it (see start_cycle).
     pending_strobe: Option<u8>,
+    last_read_halted: bool,
 
     cycles: usize,
     region: Region,
@@ -111,6 +112,7 @@ impl<'a> Bus<'a> {
             abort_dmc_dma: false,
             internal_bus: 0,
             pending_strobe: None,
+            last_read_halted: false,
             cycles: 0,
             master_clock: 0,
             ppu_clock: 0,
@@ -200,6 +202,7 @@ impl<'a> Bus<'a> {
     }
 
     pub fn cpu_read(&mut self, addr: u16) -> u8 {
+        self.last_read_halted = self.need_halt;
         if self.need_halt {
             self.run_dma(Some(addr));
         }
@@ -220,9 +223,14 @@ impl<'a> Bus<'a> {
     fn late_2002_bits(&mut self, value: u8) -> u8 {
         let value = (value & !0x60) | (self.ppu.status.snapshot() & 0x60);
         self.ppu.refresh_status_latch(value);
+        self.open_bus = value;
         self.internal_bus = value;
         value
     }
+
+    pub fn last_read_halted(&self) -> bool {
+        self.last_read_halted
+    } 
 
     pub fn cpu_write(&mut self, addr: u16, data: u8) {
         self.instruction_cycles = self.instruction_cycles.saturating_add(1);
@@ -559,7 +567,7 @@ impl<'a> Bus<'a> {
 impl Mem for Bus<'_> {
     fn mem_read(&mut self, addr: u16) -> u8 {
         if addr == 0x4015 {
-            let value =  (self.apu.read_status() & !0x20) | (self.open_bus & 0x20);
+            let value =  (self.apu.read_status() & !0x20) | (self.internal_bus & 0x20);
             self.internal_bus = value;
             return value;
         }
@@ -664,13 +672,14 @@ mod test {
         use crate::joypad::JoypadButton;
         let mut bus = test_bus();
         bus.joypads[1].set_button_pressed_status(JoypadButton::BUTTON_A, true);
-        bus.mem_write(0x4016, 1);
-        bus.mem_write(0x4016, 0);
-        assert_eq!(bus.mem_read(0x4016) & 1, 0);
-        assert_eq!(bus.mem_read(0x4017) & 1, 1);
+        bus.cpu_write(0x4016, 1);
+        bus.cpu_write(0x4016, 0);
+        bus.idle_cycle();
+        assert_eq!(bus.cpu_read(0x4016) & 1, 0);
+        assert_eq!(bus.cpu_read(0x4017) & 1, 1);
     }
 
-        #[test]
+    #[test]
     fn test_reset_button_resets_the_ppu_only_on_the_front_loader() {
         for (console, resets) in [
             (Console::Nes, true),
@@ -696,7 +705,7 @@ mod test {
             bus.set_console(console);
             bus.mem_write(0x4016, 0); // no buttons: data bit 0 reads 0
             for (port, addr) in [0x4016u16, 0x4017].into_iter().enumerate() {
-                bus.open_bus = 0xFF;
+                bus.internal_bus = 0xFF;
                 assert_eq!(
                     bus.mem_read(addr),
                     expected[port],
@@ -712,7 +721,7 @@ mod test {
     fn test_famicom_microphone() {
         let mut bus = test_bus();
         bus.joypads[1].microphone = true;
-        bus.open_bus = 0;
+        bus.internal_bus = 0;
         assert_eq!(bus.mem_read(0x4016) & 0x04, 0, "only the Famicom has one");
         bus.set_console(Console::Famicom);
         assert_eq!(bus.mem_read(0x4016) & 0x04, 0x04);
@@ -799,7 +808,7 @@ mod test {
         assert_eq!(lengths, vec![513, 514]);
     }
 
-        #[test]
+    #[test]
     fn test_strobe_reaches_the_controllers_on_a_get_to_put_transition() {
         use crate::joypad::JoypadButton;
         // a read-modify-write instruction writes 1 then 0 on back-to-back

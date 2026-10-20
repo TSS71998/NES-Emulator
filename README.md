@@ -7,7 +7,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 ## Features
 
 - **Plays most of the NES library**: mappers 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM), which covers games like *Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man* and *Tetris*.
-- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and 129 of AccuracyCoin's 146 (see [Technical](#technical)), so games that rely on precise timing work.
+- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and 134 of AccuracyCoin's 146 (see [Technical](#technical)), so games that rely on precise timing work.
 - **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
 - **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
@@ -20,7 +20,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ### CPU (6502)
 
-- All official and unofficial opcodes, including the unstable `SHX`/`SHY`/`SHA`/`TAS` stores. Cycle counts match the `nestest` reference log, including page-crossing and branch penalties.
+- All official and unofficial opcodes, including the unstable `SHX`/`SHY`/`SHA`/`TAS` stores (whose value loses its `& (H + 1)` when DMA halts the cycle before the write). Cycle counts match the `nestest` reference log, including page-crossing and branch penalties.
 - Every memory access takes its own cycle, and the PPU and APU run up to that point first, so a register read or write lands on the exact PPU dot it would on hardware.
 - The 6502's dummy accesses happen on the bus too: indexed reads that cross a page first read the wrong address, indexed stores always read before writing, read-modify-write instructions write the old value back before the new one, one-byte instructions read the next byte, indexed zero-page modes read the unindexed address, stack pulls and `JSR` read the stack, `RTS` reads its return address, and taken branches read the next opcode. Games that rely on these side effects on `$2002`, `$2007`, `$4015` or `$4016` behave as on hardware.
 - NMI and IRQ are polled on an instruction's second-to-last cycle (so an IRQ waiting on `CLI` runs after the next instruction), with the edge cases: an NMI arriving during BRK or an IRQ takes over its vector, a handler's first instruction always runs before another interrupt, and a taken branch polls only before its second cycle (and, if it crosses a page, before its fourth), so an IRQ arriving during its third cycle, even in a DMA that stalls it, waits one instruction.

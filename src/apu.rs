@@ -662,6 +662,7 @@ impl FrameCounter {
         self.cycle = 0;
         self.irq_inhibit = value & 0x40 != 0;
         self.irq_flag = false;
+        self.clear_delay = 0;
         self.pending_write = None;
         self.block_clocks = 0
     }
@@ -1282,7 +1283,7 @@ mod test {
         assert!(apu.irq_pending());
     }
 
-        #[test]
+    #[test]
     fn test_dmc_turns_off_two_or_three_cycles_after_the_write() {
         let mut apu = APU::new(44100);
         apu.write_register(0x4013, 0x01); // 17 bytes
