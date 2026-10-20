@@ -3,8 +3,16 @@ use super::*;
 fn set_addr(ppu: &mut NesPPU, addr: u16) {
     ppu.write_to_ppu_addr((addr >> 8) as u8);
     ppu.write_to_ppu_addr(addr as u8);
+    ppu.tick(PPU_ADDR_DELAY_DOTS as u8); // v changes a few dots later
 }
 
+/// A CPU read of $2007, then a few dots for the PPU to refill the read
+/// buffer and move v on.
+fn read(ppu: &mut NesPPU) -> u8 {
+    let value = ppu.cpu_read(7);
+    ppu.tick(6);
+    value
+}
 #[test]
 fn test_ppu_vram_writes() {
     let mut ppu = NesPPU::new_empty_rom();
@@ -22,9 +30,9 @@ fn test_ppu_vram_reads() {
 
     set_addr(&mut ppu, 0x2305);
 
-    ppu.read_data(); //load_into_buffer
+    read(&mut ppu); //load_into_buffer
     assert_eq!(ppu.vram_addr(), 0x2306);
-    assert_eq!(ppu.read_data(), 0x66);
+    assert_eq!(read(&mut ppu), 0x66);
 }
 
 #[test]
@@ -36,9 +44,9 @@ fn test_ppu_vram_reads_cross_page() {
 
     set_addr(&mut ppu, 0x21ff);
 
-    ppu.read_data(); //load_into_buffer
-    assert_eq!(ppu.read_data(), 0x66);
-    assert_eq!(ppu.read_data(), 0x77);
+    read(&mut ppu); //load_into_buffer
+    assert_eq!(read(&mut ppu), 0x66);
+    assert_eq!(read(&mut ppu), 0x77);
 }
 
 #[test]
@@ -51,10 +59,10 @@ fn test_ppu_vram_reads_step_32() {
 
     set_addr(&mut ppu, 0x21ff);
 
-    ppu.read_data(); //load_into_buffer
-    assert_eq!(ppu.read_data(), 0x66);
-    assert_eq!(ppu.read_data(), 0x77);
-    assert_eq!(ppu.read_data(), 0x88);
+    read(&mut ppu); //load_into_buffer
+    assert_eq!(read(&mut ppu), 0x66);
+    assert_eq!(read(&mut ppu), 0x77);
+    assert_eq!(read(&mut ppu), 0x88);
 }
 
 // Horizontal: https://www.nesdev.org/wiki/Mirroring
@@ -70,12 +78,12 @@ fn test_vram_horizontal_mirror() {
     ppu.write_to_data(0x77); //write to B
 
     set_addr(&mut ppu, 0x2005);
-    ppu.read_data(); //load into buffer
-    assert_eq!(ppu.read_data(), 0x66); //read from A
+    read(&mut ppu); //load into buffer
+    assert_eq!(read(&mut ppu), 0x66); //read from A
 
     set_addr(&mut ppu, 0x2C05);
-    ppu.read_data(); //load into buffer
-    assert_eq!(ppu.read_data(), 0x77); //read from b
+    read(&mut ppu); //load into buffer
+    assert_eq!(read(&mut ppu), 0x77); //read from b
 }
 
 // Vertical: https://www.nesdev.org/wiki/Mirroring
@@ -92,12 +100,12 @@ fn test_vram_vertical_mirror() {
     ppu.write_to_data(0x77); //write to b
 
     set_addr(&mut ppu, 0x2805);
-    ppu.read_data(); //load into buffer
-    assert_eq!(ppu.read_data(), 0x66); //read from a
+    read(&mut ppu); //load into buffer
+    assert_eq!(read(&mut ppu), 0x66); //read from a
 
     set_addr(&mut ppu, 0x2405);
-    ppu.read_data(); //load into buffer
-    assert_eq!(ppu.read_data(), 0x77); //read from B
+    read(&mut ppu); //load into buffer
+    assert_eq!(read(&mut ppu), 0x77); //read from B
 }
 
 #[test]
@@ -109,15 +117,15 @@ fn test_read_status_resets_latch() {
     ppu.write_to_ppu_addr(0x23);
     ppu.write_to_ppu_addr(0x05);
 
-    ppu.read_data(); //load_into_buffer
-    assert_ne!(ppu.read_data(), 0x66);
+    read(&mut ppu); //load_into_buffer
+    assert_ne!(read(&mut ppu), 0x66);
 
     ppu.read_status();
 
     set_addr(&mut ppu, 0x2305);
 
-    ppu.read_data(); //load_into_buffer
-    assert_eq!(ppu.read_data(), 0x66);
+    read(&mut ppu); //load_into_buffer
+    assert_eq!(read(&mut ppu), 0x66);
 }
 
 #[test]
@@ -128,8 +136,8 @@ fn test_ppu_vram_mirroring() {
 
     set_addr(&mut ppu, 0x6305); //0x6305 -> 0x2305
 
-    ppu.read_data(); //load into_buffer
-    assert_eq!(ppu.read_data(), 0x66);
+    read(&mut ppu); //load into_buffer
+    assert_eq!(read(&mut ppu), 0x66);
 }
 
 #[test]
@@ -242,7 +250,7 @@ fn test_palette_mirrors() {
     assert_eq!(ppu.palette_table[0x00], 0x21);
 
     set_addr(&mut ppu, 0x3F10);
-    assert_eq!(ppu.read_data(), 0x21);
+    assert_eq!(read(&mut ppu), 0x21);
 }
 
 // $2005/$2006 write into t, exactly as on https://www.nesdev.org/wiki/PPU_scrolling
@@ -258,6 +266,9 @@ fn test_scroll_and_addr_writes_share_t() {
     ppu.write_to_ppu_addr(0x3D); // bit 14 cleared, high bits replaced
     ppu.write_to_ppu_addr(0xF0);
     assert_eq!(ppu.t, 0x3DF0);
+    ppu.tick(PPU_ADDR_DELAY_DOTS as u8 - 1);
+    assert_ne!(ppu.v, 0x3DF0, "v changes a few dots later");
+    ppu.tick(1);
     assert_eq!(ppu.v, 0x3DF0);
     assert_eq!(ppu.fine_x, 5, "$2006 leaves fine X alone");
 }
@@ -269,9 +280,9 @@ fn test_palette_read_fills_buffer_from_nametable() {
     ppu.vram[underneath] = 0x42;
     ppu.palette_table[5] = 0x11;
     set_addr(&mut ppu, 0x3F05);
-    assert_eq!(ppu.read_data(), 0x11);
+    assert_eq!(read(&mut ppu), 0x11);
     set_addr(&mut ppu, 0x0000);
-    assert_eq!(ppu.read_data(), 0x42);
+    assert_eq!(read(&mut ppu), 0x42);
 }
 
 pub(crate) fn counting_ppu() -> (
@@ -474,9 +485,22 @@ fn test_palette_reads_honour_greyscale() {
     ppu.write_to_data(0x1A);
     ppu.write_to_mask(0x01); // greyscale on
     set_addr(&mut ppu, 0x3F1C);
-    assert_eq!(ppu.read_data(), 0x10, "the low four bits read as 0");
+    assert_eq!(read(&mut ppu), 0x10, "the low four bits read as 0");
     ppu.write_to_data(0x16); // writes keep all six bits
     ppu.write_to_mask(0x00);
     set_addr(&mut ppu, 0x3F1D);
-    assert_eq!(ppu.read_data(), 0x16);
+    assert_eq!(read(&mut ppu), 0x16);
+}
+
+#[test]
+fn test_ppu_data_read_fills_the_buffer_a_few_dots_later() {
+    let mut ppu = NesPPU::new_empty_rom();
+    ppu.vram[0x0305] = 0x66;
+    set_addr(&mut ppu, 0x2305);
+    ppu.cpu_read(7);
+    assert_eq!(ppu.internal_data_buf, 0, "not yet");
+    assert_eq!(ppu.vram_addr(), 0x2305);
+    ppu.tick(DATA_READ_ALE_DOTS as u8 + 2);
+    assert_eq!(ppu.internal_data_buf, 0x66);
+    assert_eq!(ppu.vram_addr(), 0x2306);
 }

@@ -3,10 +3,16 @@
 //! 16-bit shift registers that shift once per dot. The pixel at screen x
 //! comes out on dot x + 1; fine X picks which bit of the shifters is used.
 //!
-//! Sprites: at dot 257 the PPU finds the (up to 8) sprites on the next line,
-//! and during dots 257-320 fetches their pattern rows. Empty slots fetch
-//! tile $FF, so the pattern table is read 8 times per line either way.
-//! That is where MMC3 sees A12 go high when sprites use $1000.
+//! Sprites: during dots 1-256 the PPU finds the (up to 8) sprites on the
+//! next line, and during dots 257-320 loads them into its 8 sprite units:
+//! each has an attribute latch, an X counter and two 8-bit pattern shift
+//! registers. Empty slots fetch tile $FF, so the pattern table is read 8
+//! times per line either way. That is where MMC3 sees A12 go high when
+//! sprites use $1000. On the next line, each dot every unit's counter counts
+//! down, and once it reaches 0 the unit's shift registers output a pixel
+//! and shift. The counters keep running with rendering off; the shift
+//! registers don't, so turning rendering off and on mid-line can draw stale
+//! sprite data.
 
 use super::{NesPPU, palette_index};
 use crate::region::Region;
@@ -20,20 +26,22 @@ pub(super) struct Background {
     pattern_high: u16,
     attribute_low: u16,
     attribute_high: u16,
+    attribute_latch: u8,
+    load_pending: bool
 }
 
 #[derive(Clone, Copy, Default)]
-struct SpritePixel {
-    value: u8,
-    palette: u8,
-    behind_background: bool,
-    sprite_zero: bool,
+struct SpriteUnit {
+    low: u8,
+    high: u8,
+    attr: u8,
+    counter: u8
 }
 
 pub(super) struct Sprites {
     secondary: [u8; 32],
-    count: usize,
     sprite_zero_found: bool,
+    sprite_zero_loaded: bool,
     /// The byte last read from OAM or secondary OAM; $2004 returns it while
     /// the PPU is rendering.
     pub(super) buffer: u8,
@@ -42,161 +50,219 @@ pub(super) struct Sprites {
     /// copied, whether all 64 sprites have been looked at, and the 3 extra
     /// reads after an overflow.
     secondary_addr: u8,
+    secondary_full: bool,
+    secondary_reset: bool,
+
+    fetch_y: u8,
+    fetch_tile: u8,
+
     copying: bool,
     done: bool,
     overflow_reads: u8,
-    line: [SpritePixel; 256],
-    next_line: [SpritePixel; 256],
+    units: [SpriteUnit; 8]
 }
 
 impl Default for Sprites {
     fn default() -> Self {
         Sprites {
             secondary: [0xFF; 32],
-            count: 0,
             sprite_zero_found: false,
+            sprite_zero_loaded: false,
             buffer: 0xFF,
             secondary_addr: 0,
+            secondary_full: false,
+            secondary_reset: false,
+
+            fetch_y: 0,
+            fetch_tile: 0xFF,
             copying: false,
             done: false,
             overflow_reads: 0,
-            line: [SpritePixel::default(); 256],
-            next_line: [SpritePixel::default(); 256],
+            units: [SpriteUnit::default(); 8]
+        }
+    }
+}
+
+impl Sprites {
+    fn increment_secondary(&mut self) {
+        if !self.secondary_full {
+            self.secondary_addr += 1;
+            if self.secondary_addr == 0x20 {
+                self.secondary_addr = 0;
+                self.secondary_full = true;
+            }
         }
     }
 }
 
 impl NesPPU {
-    pub(super) fn render_dot(&mut self) {
+        pub(super) fn render_dot(&mut self) {
         let dot = self.dot;
         let visible = self.scanline < 240;
+        // Shifting and pixel output follow the rendering flag; the memory
+        // fetches and sprite evaluation follow it a dot later. So right
+        // after rendering comes back on the shifters move for a dot before a
+        // fetch can reload them.
+        let rendering = self.rendering_enabled();
+        let fetching = self.fetching;
 
-        if !self.rendering_enabled() {
-            if visible && (1..=256).contains(&dot) {
-                self.output_backdrop();
+        if rendering {
+            if let Some(row) = self.oam_corruption.take() {
+                self.corrupt_oam(row);
             }
-            return;
         }
 
-        if !visible && (1..=8).contains(&dot) && self.oam_addr >= 8 && self.region != Region::Pal {
-            // The 2C02 bug: when rendering starts, the OAM row (8 bytes)
-            // OAMADDR points to is copied over row 0, so if OAMADDR is 8 or
-            // more, sprites 0 and 1 are overwritten. Reliable on the common
-            // 2C02 revisions (C, E, G, H) and the Dendy; the PAL 2C07
-            // doesn't do it.
+        if rendering
+            && !visible
+            && (1..=8).contains(&dot)
+            && self.oam_addr >= 8
+            && self.region != Region::Pal
+        {
+            // The 2C02 bug: ... (unchanged)
             let i = dot as usize - 1;
             self.oam_data[i] = self.oam_data[(self.oam_addr & 0xF8) as usize + i];
         }
 
         // the shifters move on dots 2-257 and 322-337
-        if (2..=257).contains(&dot) || (322..=337).contains(&dot) {
+        if rendering && ((2..=257).contains(&dot) || (322..=337).contains(&dot)) {
             self.shift_background();
         }
-        if visible && (1..=256).contains(&dot) {
-            self.output_pixel();
-        }
-
-        if visible && (1..=256).contains(&dot) {
-            self.evaluate_sprites();
-        }
-
-        if dot == 321 {
-            self.sprites.buffer = self.sprites.secondary[0];
-        }
-
-        match dot {
-            1..=256 | 321..=336 => self.fetch_background(),
-            257..=320 => {
-                if dot == 257 {
-                    self.load_shifters();
-                    self.copy_horizontal();
-                    if !visible {
-                        self.sprites.count = 0;
-                    }
+        if (1..=256).contains(&dot) {
+            if visible {
+                if rendering {
+                    self.output_pixel();
+                } else {
+                    self.output_backdrop();
                 }
-                // OAMADDR is held at 0 while sprites are fetched
-                self.oam_addr = 0;
-                self.fetch_sprites();
             }
-            337 => self.load_shifters(),
-            338 | 340 => {
+            // the sprite counters run even with rendering off
+            self.clock_sprite_units(rendering);
+        }
+        if dot == 339 && !rendering {
+            // with rendering off on dot 339, every sprite starts at X = 0
+            for unit in self.sprites.units.iter_mut() {
+                unit.counter = 0;
+            }
+        }
+
+        if self.bg.load_pending {
+            self.load_shifters();
+        }
+        if fetching {
+            if visible && (1..=256).contains(&dot) {
+                self.evaluate_sprites();
+            }
+            if dot >= 321 {
+                self.sprites.buffer = self.sprites.secondary[self.sprites.secondary_addr as usize];
+            }
+            match dot {
+                1..=256 | 321..=336 => self.fetch_background(),
+                257..=320 => {
+                    if dot == 257 {
+                        self.sprites.sprite_zero_loaded = self.sprites.sprite_zero_found;
+                    }
+                    // OAMADDR is held at 0 while sprites are fetched
+                    self.oam_addr = 0;
+                    self.fetch_sprites();
+                }
                 // two unused nametable fetches end the line (MMC5 counts them)
-                let addr = 0x2000 | (self.v & 0x0FFF);
-                self.bus_address(addr);
+                337 | 339 => self.bus_latch(self.nametable_addr()),
+                338 | 340 => {
+                    let addr = self.nametable_addr();
+                    self.bus_read(addr);
+                }
+                _ => {}
             }
-            _ => {}
         }
-        if dot == 256 {
-            self.increment_y();
+
+        let sprites = &mut self.sprites;
+        if sprites.secondary_reset {
+            sprites.secondary_reset = false;
+            sprites.secondary_addr = 0;
+            sprites.secondary_full = false;
         }
-        if self.scanline == self.prerender_line && (280..=304).contains(&dot) {
-            self.copy_vertical();
+        if fetching && matches!(dot, 63 | 255 | 339) {
+            sprites.secondary_reset = true;
+        }
+
+        // the scroll updates need rendering on for a dot already: turned on
+        // just at dot 256, it doesn't move to the next row
+        if rendering && fetching {
+            if dot == 256 {
+                self.increment_y();
+            } else if dot == 257 {
+                self.copy_horizontal();
+            }
+            if self.scanline == self.prerender_line && (280..=304).contains(&dot) {
+                self.copy_vertical();
+            }
         }
     }
 
     fn shift_background(&mut self) {
         let bg = &mut self.bg;
         bg.pattern_low <<= 1;
-        bg.pattern_high <<= 1;
-        bg.attribute_low <<= 1;
-        bg.attribute_high <<= 1;
+        bg.pattern_high = bg.pattern_high << 1 | 1;
+        bg.attribute_low = bg.attribute_low << 1 | (bg.attribute_latch & 1) as u16;
+        bg.attribute_high = bg.attribute_high << 1 | (bg.attribute_latch >> 1) as u16;
     }
 
     /// Moves the fetched tile into the low byte of the shifters.
     fn load_shifters(&mut self) {
         let bg = &mut self.bg;
+        bg.load_pending = false;
         bg.pattern_low = (bg.pattern_low & 0xFF00) | bg.next_low as u16;
         bg.pattern_high = (bg.pattern_high & 0xFF00) | bg.next_high as u16;
         let spread = |bit: u8| if bit != 0 { 0xFF } else { 0x00 };
         bg.attribute_low = (bg.attribute_low & 0xFF00) | spread(bg.next_palette & 1);
         bg.attribute_high = (bg.attribute_high & 0xFF00) | spread(bg.next_palette & 2);
+        bg.attribute_latch = bg.next_palette;
     }
 
-    /// One step of the 8-dot tile fetch. Each fetch takes two dots and the
-    /// byte is read on the second: nametable on dot 2, attribute on 4,
+    /// One step of the 8-dot tile fetch: four 2-dot memory accesses (see
+    /// `bus_latch`/`bus_read`), nametable read on dot 2, attribute on 4,
     /// pattern low on 6, pattern high on 8, after which coarse X moves on.
     /// The shifters take the new tile on the next dot (9, 17, ...).
     fn fetch_background(&mut self) {
         match self.dot & 7 {
-            1 => {
-                if self.dot >= 9 {
-                    self.load_shifters();
-                }
-            }
+            1 => self.bus_latch(self.nametable_addr()),
             2 => {
-                let addr = 0x2000 | (self.v & 0x0FFF);
-                self.bus_address(addr);
-                self.bg.next_tile = self.read_nametable(addr);
+                let addr = self.nametable_addr();
+                self.bg.next_tile = self.bus_read(addr);
             }
+            3 => self.bus_latch(self.attribute_addr()),
             4 => {
-                let v = self.v;
-                let addr = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
-                self.bus_address(addr);
-                let shift = ((v >> 4) & 4) | (v & 2);
-                self.bg.next_palette = (self.read_nametable(addr) >> shift) & 0b11;
+                let addr = self.attribute_addr();
+                let shift = ((self.v >> 4) & 4) | (self.v & 2);
+                self.bg.next_palette = (self.bus_read(addr) >> shift) & 0b11;
             }
+            5 => self.bus_latch(self.background_pattern_addr()),
             6 => {
                 let addr = self.background_pattern_addr();
-                self.bus_address(addr);
-                self.bg.next_low = self.chr_read(addr);
+                self.bg.next_low = self.bus_read(addr);
             }
-            0 => {
+            7 => self.bus_latch(self.background_pattern_addr() + 8),
+            _ => {
                 let addr = self.background_pattern_addr() + 8;
-                self.bus_address(addr);
-                self.bg.next_high = self.chr_read(addr);
+                self.bg.next_high = self.bus_read(addr);
+                self.bg.load_pending = true;
                 self.increment_coarse_x();
             }
-            _ => {}
-        }
+        } 
+    }
+
+    fn nametable_addr(&self) -> u16 {
+        0x2000 | (self.v & 0x0FFF)
+    }
+
+    fn attribute_addr(&self) -> u16 {
+        let v = self.v;
+        0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07)
     }
 
     fn background_pattern_addr(&self) -> u16 {
         let fine_y = (self.v >> 12) & 0b111;
         self.ctrl.bknd_pattern_addr() + self.bg.next_tile as u16 * 16 + fine_y
-    }
-
-    fn read_nametable(&self, addr: u16) -> u8 {
-        self.vram[self.mirror_vram_addr(addr) as usize]
     }
 
     pub(super) fn increment_coarse_x(&mut self) {
@@ -234,6 +300,70 @@ impl NesPPU {
         self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
     }
 
+    /// Rendering was turned off on a rendering line. Secondary OAM's
+    /// address at that moment picks an OAM row (8 bytes) to corrupt when
+    /// rendering next runs; during evaluation (dots 65-256) it's rounded up
+    /// to a whole sprite.
+    pub(super) fn seed_oam_corruption(&mut self) {
+        if self.oam_corruption.is_some() {
+            return;
+        }
+        let mut row = self.sprites.secondary_addr;
+        if (65..=256).contains(&self.dot) && row & 3 != 0 {
+            row = ((row & !3) + 4) & 0x1F;
+        }
+        self.oam_corruption = Some(row);
+    }
+
+    /// OAM corruption: on the first rendering dot after rendering was
+    /// turned off mid-line, OAM row 0 is copied over the seeded row, and
+    /// secondary OAM's byte 0 over the seeded byte (AccuracyCoin "OAM
+    /// Corruption").
+    fn corrupt_oam(&mut self, row: u8) {
+        let row = row as usize;
+        for i in 0..8 {
+            self.oam_data[row * 8 + 1] = self.oam_data[i];
+        }
+        self.sprites.secondary[row] = self.sprites.secondary[0];
+    }
+
+    /// The first dot of a memory access (ALE): `addr` goes on the bus and
+    /// its low byte into the octal latch. If the $2007 state machine reads
+    /// on this dot, the two collide: the latch takes the data still on the
+    /// low address lines from the last read, and the state machine reads
+    /// from the new high byte and that latch, feeding the result back into
+    /// the latch (AccuracyCoin "ALE + Read").
+    pub(super) fn bus_latch(&mut self, addr: u16) {
+        self.bus_used = true;
+        if self.data_read {
+            self.octal_latch = self.addr_bus as u8;
+            self.addr_bus = addr & 0x3FFF;
+            let data = self.memory_read((self.addr_bus & 0x3F00) | self.octal_latch as u16);
+            self.addr_bus = (self.addr_bus & 0x3F00) | data as u16;
+            self.internal_data_buf = data;
+            self.octal_latch = data;
+        } else {
+            self.addr_bus = addr & 0x3FFF;
+            self.octal_latch = addr as u8;
+        }
+    }
+
+    /// The second dot of a memory access: reads from the high byte of
+    /// `addr`, worked out again now, and the low byte latched a dot ago, so
+    /// if v changed in between ($2006) the read is from a "hybrid" address.
+    /// A $2007 read on the same dot gets the same byte.
+    pub(super) fn bus_read(&mut self, addr: u16) -> u8 {
+        self.bus_used = true;
+        let addr = (addr & 0x3F00) | self.octal_latch as u16;
+        self.bus_address(addr);
+        let data = self.memory_read(addr);
+        self.addr_bus = (addr & 0x3F00) | data as u16;
+        if self.data_read {
+            self.internal_data_buf = data;
+        }
+        data
+    }
+
     /// One dot of sprite evaluation (dots 1-256 of a visible line), which
     /// finds the first 8 sprites in OAM that cover the next line.
     ///
@@ -264,13 +394,19 @@ impl NesPPU {
         let sprites = &mut self.sprites;
 
         if dot <= 64 {
-            sprites.buffer = 0xFF;
-            sprites.secondary[(dot as usize - 1) >> 1] = 0xFF;
+            if dot & 1 == 1 {
+                sprites.buffer = 0xFF;
+                if dot == 1 {
+                    sprites.secondary_addr = 0;
+                }
+            } else {
+                sprites.secondary[sprites.secondary_addr as usize] = 0xFF;
+                sprites.increment_secondary();
+            }
             return;
         }
 
         if dot == 65 {
-            sprites.secondary_addr = 0;
             sprites.copying = false;
             sprites.done = false;
             sprites.overflow_reads = 0;
@@ -288,23 +424,21 @@ impl NesPPU {
         let mut overflow = false;
 
         if sprites.done {
-            addr += 4;
-            if sprites.secondary_addr >= 0x20 {
-                sprites.buffer = sprites.secondary[(sprites.secondary_addr & 0x1F) as usize];
-            }
-        } else if sprites.secondary_addr < 0x20 { 
+            addr = (addr + 4) & !3;
+            sprites.buffer = sprites.secondary[sprites.secondary_addr as usize];
+        } else if !sprites.secondary_full { 
             sprites.secondary[sprites.secondary_addr as usize] = value;
             if !sprites.copying {
                 if in_range(value) {
                     sprites.copying = true;
                     sprites.sprite_zero_found |= dot == 66;
-                    sprites.secondary_addr += 1;
+                    sprites.increment_secondary();
                     addr += 1;
                 } else {
                     addr = (addr + 4) & !3;
                 }
             } else {
-                sprites.secondary_addr += 1;
+                sprites.increment_secondary();
                 if sprites.secondary_addr & 3 == 0 {
                     sprites.copying = false;
                     addr = if in_range(value) {
@@ -317,7 +451,7 @@ impl NesPPU {
                 }
             }
         } else {
-            sprites.buffer = sprites.secondary[(sprites.secondary_addr & 0x1F) as usize];
+            sprites.buffer = sprites.secondary[sprites.secondary_addr as usize];
             if sprites.overflow_reads > 0 {
                 addr += 1;
                 sprites.overflow_reads -= 1;
@@ -339,92 +473,118 @@ impl NesPPU {
         }
         self.oam_addr = addr as u8;
 
-        if dot == 256 {
-            sprites.count = (sprites.secondary_addr >> 2) as usize;
-        }
         if overflow {
             self.status.set_sprite_overflow(true);
         }
     }
 
-    /// Dots 257-320: 8 dots per sprite slot, two garbage nametable fetches
-    /// then the two pattern bytes (read on dots 262 and 264 for the first
-    /// slot). The pixels go into `next_line`
+        /// Dots 257-320: 8 dots per sprite unit, reading its secondary OAM
+    /// entry through the secondary OAM address, one byte a dot (the address
+    /// moves on dots 1-3 and 8 of the 8): Y, tile, attribute and X, latched
+    /// on dots 2-5. Meanwhile the bus does two garbage nametable fetches and
+    /// the two pattern fetches (read on dots 6 and 8). A sprite whose Y isn't
+    /// in range of the line (including empty slots, Y = $FF) still fetches
+    /// its pattern but loads 0s. The pre-render line doesn't evaluate
+    /// sprites, so it loads whatever secondary OAM was left with, against
+    /// line 261 & $FF. If the address is frozen (secondary OAM was full and
+    /// rendering was off for the reset on dot 255) every byte is entry 0's
+    /// (AccuracyCoin "Frozen OAM2 Increment").
     fn fetch_sprites(&mut self) {
         let offset = self.dot - 257;
         let slot = (offset / 8) as usize;
-        self.sprites.buffer = self.sprites.secondary[slot * 4 + (offset as usize & 7).min(3)];
+        let latched = self.sprites.buffer;
+        self.sprites.buffer = self.sprites.secondary[self.sprites.secondary_addr as usize];
         match offset & 7 {
-            1 | 3 => {
-                let addr = 0x2000 | (self.v & 0x0FFF);
-                self.bus_address(addr);
+            0 => {
+                self.bus_latch(self.nametable_addr());
+                self.sprites.increment_secondary();
+            }
+            1 => {
+                self.sprites.fetch_y = latched;
+                let addr = self.nametable_addr();
+                self.bus_read(addr);
+                self.sprites.increment_secondary();
+            }
+            2 => {
+                self.sprites.fetch_tile = latched;
+                self.bus_latch(self.nametable_addr());
+                self.sprites.increment_secondary();
+            }
+            3 => {
+                self.sprites.units[slot].attr = latched;
+                let addr = self.nametable_addr();
+                self.bus_read(addr);
+            }
+            4 => {
+                self.sprites.units[slot].counter = latched;
+                self.bus_latch(self.sprite_fetch_addr(slot));
             }
             5 => {
                 let addr = self.sprite_fetch_addr(slot);
-                self.bus_address(addr);
+                let byte = self.bus_read(addr);
+                self.sprites.units[slot].low = self.sprite_pattern(slot, byte);
             }
-            7 => {
+            6 => self.bus_latch(self.sprite_fetch_addr(slot) + 8),
+            _ => {
                 let addr = self.sprite_fetch_addr(slot) + 8;
-                self.bus_address(addr);
-                self.load_sprite(slot);
+                let byte = self.bus_read(addr);
+                self.sprites.units[slot].high = self.sprite_pattern(slot, byte);
+                self.sprites.increment_secondary();
             }
-            _ => {}
         }
-        if self.dot == 320 {
-            std::mem::swap(&mut self.sprites.line, &mut self.sprites.next_line);
-            self.sprites.next_line = [SpritePixel::default(); 256];
-        }
+    }
+
+    /// The row of the sprite being fetched on this line, if it's in range.
+    fn sprite_row(&self) -> Option<u16> {
+        let y = self.sprites.fetch_y as u16;
+        let line = self.scanline & 0xFF;
+        let height = self.ctrl.sprite_size() as u16;
+        (line >= y && line - y < height).then(|| line - y)
     }
 
     fn sprite_fetch_addr(&self, slot: usize) -> u16 {
-        if slot >= self.sprites.count {
-            // empty slots fetch tile $FF
-            return self.sprite_row_addr(0xFF, 0);
-        }
-        let sprite = &self.sprites.secondary[slot * 4..slot * 4 + 4];
-        let (y, tile, attr) = (sprite[0], sprite[1], sprite[2]);
+        let attr = self.sprites.units[slot].attr;
         let height = self.ctrl.sprite_size() as u16;
-        let mut row = self.scanline.wrapping_sub(y as u16) & (height - 1);
+        let y = self.sprites.fetch_y as u16;
+        let mut row = (self.scanline & 0xFF).wrapping_sub(y) & (height - 1);
         if attr & 0x80 != 0 {
             row = height - 1 - row;
         }
-        self.sprite_row_addr(tile, row as usize)
+        self.sprite_row_addr(self.sprites.fetch_tile, row as usize)
     }
 
-    /// Reads a sprite's pattern row and draws it into `next_line` wherever no
-    /// earlier sprite has an opaque pixel.
-    fn load_sprite(&mut self, slot: usize) {
-        if slot >= self.sprites.count {
-            return;
+    /// One of a sprite's pattern bytes as loaded into its unit: flipped for
+    /// horizontal flip, or 0 if the sprite isn't on this line.
+    fn sprite_pattern(&self, slot: usize, byte: u8) -> u8 {
+        if self.sprite_row().is_none() {
+            0
+        } else if self.sprites.units[slot].attr & 0x40 != 0 {
+            byte.reverse_bits()
+        } else {
+            byte
         }
-        let addr = self.sprite_fetch_addr(slot);
-        let (attr, x) = (
-            self.sprites.secondary[slot * 4 + 2],
-            self.sprites.secondary[slot * 4 + 3],
-        );
-        let sprite_zero = slot == 0 && self.sprites.sprite_zero_found;
-        let mut low = self.chr_read(addr);
-        let mut high = self.chr_read(addr + 8);
-        if attr & 0x40 != 0 {
-            low = low.reverse_bits();
-            high = high.reverse_bits();
-        }
-        for col in 0..8 {
-            let px = x as usize + col;
-            if px > 255 {
-                break;
-            }
-            let value = ((high >> (7 - col)) & 1) << 1 | ((low >> (7 - col)) & 1);
-            let pixel = &mut self.sprites.next_line[px];
-            if value != 0 && pixel.value == 0 {
-                *pixel = SpritePixel {
-                    value,
-                    palette: attr & 0b11,
-                    behind_background: attr & 0x20 != 0,
-                    sprite_zero,
-                };
+    }
+
+    /// Dots 1-256: each unit counts down to its sprite's X position, then
+    /// shifts its pattern out (only while rendering).
+    fn clock_sprite_units(&mut self, rendering: bool) {
+        for unit in self.sprites.units.iter_mut() {
+            if unit.counter > 0 {
+                unit.counter -= 1;
+            } else if rendering {
+                unit.low <<= 1;
+                unit.high <<= 1;
             }
         }
+    }
+
+    /// The first opaque pixel among the sprite units that have started:
+    /// (unit, value, attributes).
+    fn sprite_pixel(&self) -> Option<(usize, u8, u8)> {
+        self.sprites.units.iter().enumerate().find_map(|(i, unit)| {
+            let value = (unit.high >> 7) << 1 | unit.low >> 7;
+            (unit.counter == 0 && value != 0).then_some((i, value, unit.attr))
+        })
     }
 
     /// Mixes the background and sprite pixel for this dot, sets sprite 0
@@ -441,27 +601,29 @@ impl NesPPU {
                 (((bg.attribute_high >> bit) & 1) << 1 | ((bg.attribute_low >> bit) & 1)) as u8;
         }
 
-        let mut sprite = SpritePixel::default();
+        let mut sprite = None;
         if self.mask.show_sprites() && (x >= 8 || self.mask.leftmost_8pxl_sprite()) {
-            sprite = self.sprites.line[x];
+            sprite = self.sprite_pixel();
         }
 
-        if sprite.sprite_zero && sprite.value != 0 && bg_value != 0 && x != 255 {
-            self.status.set_sprite_zero_hit(true);
-        }
-
-        let palette_addr = match (bg_value, sprite.value) {
-            (0, 0) => 0,
-            (0, s) => 0x10 | sprite.palette << 2 | s,
-            (b, 0) => bg_palette << 2 | b,
-            (b, s) => {
-                if sprite.behind_background {
-                    bg_palette << 2 | b
-                } else {
-                    0x10 | sprite.palette << 2 | s
-                }
+        if let Some((unit, _, _)) = sprite {
+            if unit == 0 && self.sprites.sprite_zero_found && bg_value != 0 && x != 255 {
+                self.status.set_sprite_zero_hit(true);
             }
-        };
+        }
+
+        let palette_addr = match (bg_value, sprite) {
+            (0, None) => 0,
+            (0, Some((_, s, attr))) => 0x10 | (attr & 3) << 2 | s,
+            (b, None) => bg_palette << 2 | b,
+            (b, Some((_, s, attr))) => {
+                if attr & 0x20 != 0 {
+                     bg_palette << 2 | b
+                 } else {
+                    0x10 | (attr & 3) << 2 | s
+                 }
+             }
+         };
         let colour = self.palette_table[palette_index(palette_addr as u16)];
         self.put_pixel(x, colour);
     }
@@ -887,5 +1049,148 @@ mod test {
             ppu.tick(1);
         }
         assert_eq!((ppu.scanline, ppu.dot), (44, 85)); // pixel 84 is output at dot 85
+    }
+
+        #[test]
+    fn test_sprite_counters_run_while_rendering_is_off() {
+        let mut ppu = test_ppu();
+        ppu.sprites.units[0] = SpriteUnit {
+            low: 0x80,
+            high: 0x00,
+            attr: 0,
+            counter: 2,
+        };
+        ppu.clock_sprite_units(false);
+        ppu.clock_sprite_units(false);
+        assert_eq!(ppu.sprites.units[0].counter, 0, "counted down anyway");
+        ppu.clock_sprite_units(false);
+        assert_eq!(ppu.sprites.units[0].low, 0x80, "but doesn't shift");
+        assert_eq!(ppu.sprite_pixel(), Some((0, 1, 0)));
+        ppu.clock_sprite_units(true);
+        assert_eq!(ppu.sprites.units[0].low, 0x00);
+    }
+
+    #[test]
+    fn test_rendering_off_on_dot_339_starts_every_sprite_at_x_0() {
+        let mut ppu = test_ppu();
+        run_frame(&mut ppu);
+        run_to(&mut ppu, 10, 330);
+        for unit in ppu.sprites.units.iter_mut() {
+            unit.counter = 50;
+        }
+        ppu.write_to_mask(0);
+        run_to(&mut ppu, 10, 340);
+        assert!(ppu.sprites.units.iter().all(|u| u.counter == 0));
+    }
+
+    #[test]
+    fn test_background_shifters_shift_in_ones_and_the_attribute_latch() {
+        let mut ppu = test_ppu();
+        ppu.bg.attribute_latch = 0b10;
+        for _ in 0..3 {
+            ppu.shift_background();
+        }
+        assert_eq!(ppu.bg.pattern_low, 0);
+        assert_eq!(ppu.bg.pattern_high, 0b111, "the high plane shifts in 1s");
+        assert_eq!(ppu.bg.attribute_low, 0);
+        assert_eq!(ppu.bg.attribute_high, 0b111);
+    }
+
+    #[test]
+    fn test_a_fetch_reads_from_the_latched_low_byte() {
+        // the low byte is latched on the first dot of a fetch; the high
+        // byte is worked out again on the second (a "hybrid" address if v
+        // changed in between)
+        let mut ppu = test_ppu();
+        let hybrid = ppu.mirror_vram_addr(0x2C45) as usize;
+        ppu.vram[hybrid] = 0x77;
+        ppu.bus_latch(0x2345);
+        assert_eq!(ppu.bus_read(0x2C00), 0x77);
+    }
+
+    #[test]
+    fn test_ppu_data_read_during_rendering_gets_the_byte_rendering_reads() {
+        let mut ppu = test_ppu();
+        let addr = ppu.mirror_vram_addr(0x2123) as usize;
+        ppu.vram[addr] = 0x5A;
+        ppu.bus_latch(0x2123);
+        ppu.data_read = true; // the $2007 state machine reads on this dot
+        ppu.bus_read(0x2123);
+        assert_eq!(ppu.internal_data_buf, 0x5A);
+    }
+
+    #[test]
+    fn test_frozen_secondary_oam_address_loads_entry_0_into_every_unit() {
+        let mut ppu = test_ppu();
+        ppu.sprites.secondary = [0xFF; 32];
+        ppu.sprites.secondary[..4].copy_from_slice(&[0xC1, 0x24, 0x00, 0x10]);
+        ppu.sprites.secondary_addr = 0;
+        ppu.sprites.secondary_full = true; // not reset on dot 255
+        ppu.scanline = 196;
+        for dot in 257..=320 {
+            ppu.dot = dot;
+            ppu.fetch_sprites();
+        }
+        for unit in ppu.sprites.units {
+            assert_eq!((unit.attr, unit.counter), (0xC1, 0xC1));
+        }
+
+        // normally the address walks through all 8 entries
+        ppu.sprites.secondary_full = false;
+        for dot in 257..=320 {
+            ppu.dot = dot;
+            ppu.fetch_sprites();
+        }
+        assert_eq!(ppu.sprites.units[0].counter, 0x10);
+        assert_eq!(ppu.sprites.units[1].counter, 0xFF);
+        assert!(
+            ppu.sprites.secondary_full,
+            "wrapped at the end of the fetch"
+        );
+    }
+
+    /// Turns rendering off around dot 8 of line 5, on again for a frame, and
+    /// returns OAM.
+    fn turn_rendering_off_mid_line(ppu: &mut NesPPU) -> [u8; 256] {
+        run_frame(ppu);
+        numbered_oam(ppu);
+        run_to(ppu, 5, 6);
+        ppu.write_to_mask(0);
+        run_to(ppu, 20, 0);
+        ppu.write_to_mask(0b0001_1110);
+        run_frame(ppu);
+        ppu.oam_data
+    }
+
+    #[test]
+    fn test_turning_rendering_off_mid_line_corrupts_an_oam_row() {
+        // secondary OAM's address (3 after dot 6 of the clear) picks the row
+        // that row 0 is copied over once rendering is back on
+        let oam = turn_rendering_off_mid_line(&mut test_ppu());
+        assert_eq!(oam[24..32], [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(oam[8..24], (8..24).collect::<Vec<u8>>()[..], "only one row");
+        assert_eq!(oam[32], 32);
+
+        let mut ppu = test_ppu();
+        ppu.set_oam_row_corruption(false);
+        let oam = turn_rendering_off_mid_line(&mut ppu);
+        assert_eq!(oam[24..32], [24, 25, 26, 27, 28, 29, 30, 31]);
+    }
+
+    #[test]
+    fn test_2002_sees_sprite_flags_late() {
+        let mut ppu = test_ppu();
+        ppu.write_to_mask(0);
+        ppu.tick(5);
+        // a sprite 0 hit shows 2 dots after the dot it happens on, an
+        // overflow 1 dot after (set here as if on the next dot)
+        ppu.status.set_sprite_zero_hit(true);
+        ppu.status.set_sprite_overflow(true);
+        ppu.tick(1);
+        assert_eq!(ppu.late_sprite_flags(), 0x00);
+        ppu.tick(1);
+        assert_eq!(ppu.late_sprite_flags(), 0x20);
+        ppu.tick(1);
+        assert_eq!(ppu.late_sprite_flags(), 0x60);
     }
 }

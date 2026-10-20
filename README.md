@@ -81,7 +81,7 @@ These pass in full:
 - **DMA**: `sprdma_and_dmc_dma` and `dmc_dma_during_read4`
 - **Mappers**: `mmc3_test_2` tests 1–5 (and 6 for boards marked as MMC3A in a NES 2.0 header)
 
-[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes 129. The rest are the `SHA`/`SHX`/`SHY`/`SHS` stores when DMA lands mid-instruction, the second half of `$2002` flag timing, the `$2004`/`$2007` stress tests, OAM corruption, and PPU internals such as stale shift registers and mid-fetch address-bus effects.
+[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes 134. The rest are the second half of `$2002` flag timing, the `$2004`/`$2007` stress tests, OAM corruption, and PPU internals such as stale shift registers and mid-fetch address-bus effects.
 
 ## Limitations
 

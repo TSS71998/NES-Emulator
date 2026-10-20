@@ -170,6 +170,7 @@ fn main() {
 
     bus.set_region(region);
     bus.set_console(console);
+    bus.set_oam_row_corruption(!args.no_oam_corruption);
     bus.set_audio_callback(sample_rate, move |samples: &[f32]| {
         audio_output.push(samples)
     });
@@ -187,15 +188,20 @@ fn main() {
 struct Args {
     rom: String,
     region: Option<Region>,
-    console: Option<Console>
+    console: Option<Console>,
+    no_oam_corruption: bool
 }
 
-/// `nes_emulator [--region ntsc|pal|dendy] [rom]`
+/// `nes_emulator [--region ntsc|pal|dendy] [--console nes|toploader|famicom]
+/// [--no-oam-corruption] [rom]`
 fn parse_args() -> Args {
     let mut rom = None;
     let mut region = None;
     let mut console = None;
+    let mut no_oam_corruption = false;
+
     let mut args = std::env::args().skip(1);
+
     while let Some(arg) = args.next() {
         // "--name value" or "--name=value"
         let mut option = |name: &str| -> Option<String> {
@@ -218,14 +224,17 @@ fn parse_args() -> Args {
                     v
                 ))
             }));
-        } else {
-            rom = Some(arg);
-        }
+        } else if arg == "--no-oam-corruption" {
+            no_oam_corruption = true;
+         } else {
+             rom = Some(arg);
+         }
     }
     Args {
         rom: rom.unwrap_or_else(|| "Alter_Ego.nes".to_string()),
         region,
-        console
+        console,
+        no_oam_corruption
     }
 }
 

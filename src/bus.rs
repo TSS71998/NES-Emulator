@@ -208,6 +208,14 @@ impl<'a> Bus<'a> {
         }
         self.instruction_cycles = self.instruction_cycles.saturating_add(1);
         self.start_cycle(true);
+        let oam_data = (0x2000..=0x3FFF).contains(&addr) && addr & 7 == 4;
+        if oam_data {
+            // $2004 is sampled a dot later than the other registers (the
+            // PPU's OAM latch updates on the first half of the dot)
+            self.master_clock += self.ppu_divider;
+            self.run_ppu();
+            self.master_clock -= self.ppu_divider;
+        }
         let value = self.mem_read(addr);
         self.end_cycle(true);
         if (0x2000..=0x3FFF).contains(&addr) && addr & 7 == 2 {
@@ -221,7 +229,7 @@ impl<'a> Bus<'a> {
     /// of the CPU cycle: about 2 PPU dots later. So those two bits are taken
     /// from the PPU as it is now.
     fn late_2002_bits(&mut self, value: u8) -> u8 {
-        let value = (value & !0x60) | (self.ppu.status.snapshot() & 0x60);
+        let value = (value & !0x60) | self.ppu.late_sprite_flags();
         self.ppu.refresh_status_latch(value);
         self.open_bus = value;
         self.internal_bus = value;
@@ -231,6 +239,11 @@ impl<'a> Bus<'a> {
     pub fn last_read_halted(&self) -> bool {
         self.last_read_halted
     } 
+
+    /// See NesPPU::set_oam_row_corruption.
+    pub fn set_oam_row_corruption(&mut self, on: bool) {
+        self.ppu.set_oam_row_corruption(on);
+    }
 
     pub fn cpu_write(&mut self, addr: u16, data: u8) {
         self.instruction_cycles = self.instruction_cycles.saturating_add(1);
