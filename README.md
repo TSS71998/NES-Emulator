@@ -7,7 +7,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 ## Features
 
 - **Plays most of the NES library**: mappers 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM), which covers games like *Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man* and *Tetris*.
-- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and 134 of AccuracyCoin's 146 (see [Technical](#technical)), so games that rely on precise timing work.
+- **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and all 146 of AccuracyCoin's tests (see [Technical](#technical)), so games that rely on precise timing work.
 - **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
 - **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
 - **Battery saves**: games with battery-backed RAM (like *Final Fantasy* and *Zelda*) save to a `.sav` file next to the ROM, every few seconds while the RAM changes and when you quit.
@@ -28,12 +28,15 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ### PPU
 
-- Dot-accurate: each of the 341 dots per line does what the real PPU does on it. Background tiles are fetched every 8 dots into shift registers; sprites for the next line are evaluated on dots 1–256 (secondary OAM cleared on dots 1–64, then one OAM byte read every other dot) and their patterns fetched on dots 257–320; one pixel comes out per dot.
+- Dot-accurate: each of the 341 dots per line does what the real PPU does on it. Background tiles are fetched every 8 dots into shift registers; sprites for the next line are evaluated on dots 1–256 (secondary OAM cleared on dots 1–64, then one OAM byte read every other dot) and loaded into the 8 sprite units on dots 257–320; one pixel comes out per dot.
+- Memory accesses take two dots, as on the chip: the address goes out and its low byte into the board's octal latch on one dot, and the read happens on the next from the high byte and that latch, while the low address lines carry the data. A `$2007` read starts the PPU's data state machine, which latches v 4 dots later and fills the read buffer 2 dots after that; with rendering on, the buffer gets whatever rendering reads on that dot, or collides with it. A second `$2006` write reaches v 4 dots after the write, so a fetch in between reads from a "hybrid" address.
+- Rendering on and off: shifting, pixel output and the scroll updates follow PPUMASK a dot after it's written, and the fetches and sprite evaluation a dot later still. The background shift registers shift in 1s (high plane) and the attribute latch, and only reload when a tile's last fetch happened, so turning rendering off and on draws stale or shifted-in data.
 - Scrolling uses the real internal registers (loopy `v`, `t`, `x` and `w`), so mid-line changes to scroll, CHR banks, palettes or PPUMASK show up on the dot they happen.
-- Sprites: 8×8 and 8×16, 8 per line with the overflow flag set on the exact dot (including its hardware bug), priority, left-column clipping, and sprite-0 hit on the exact pixel. Evaluation starts wherever OAMADDR points, and the first sprite it finds acts as sprite 0. With OAMADDR not a multiple of 4, sprites overlap and realign exactly as on hardware (a Y or X byte out of range realigns OAMADDR to a sprite boundary). `$2004` reads during rendering return the byte the PPU is working on, and writes skip to the start of the next sprite instead of writing.
-- OAM corruption: if OAMADDR is 8 or more when rendering starts, the OAM row it points to is copied over sprites 0 and 1, as on the 2C02 and Dendy (not PAL).
+- Sprites: 8×8 and 8×16, 8 per line with the overflow flag set on the exact dot (including its hardware bug), priority, left-column clipping, and sprite-0 hit on the exact pixel. Evaluation starts wherever OAMADDR points, and the first sprite it finds acts as sprite 0. With OAMADDR not a multiple of 4, sprites overlap and realign exactly as on hardware (a Y or X byte out of range realigns OAMADDR to a sprite boundary). `$2004` reads during rendering return the byte the PPU is working on (sampled a dot later than other registers), and writes skip to the start of the next sprite instead of writing.
+- Sprite units: each of the 8 has an X counter, an attribute latch and two pattern shift registers. The counters run even with rendering off but the shift registers don't, and turning rendering off over dot 339 starts every sprite at X = 0. Secondary OAM has its real address register: the sprite fetch reads Y, tile, attribute and X through it, and once it wraps it stays frozen at 0 until rendering is on for its reset on dot 63, 255 or 339.
+- OAM corruption: turning rendering off on a rendering line copies OAM row 0 over the row picked by secondary OAM's address at that moment, the next time rendering runs. And if OAMADDR is 8 or more when rendering starts, the OAM row it points to is copied over sprites 0 and 1, as on the 2C02 and Dendy (not PAL). `--no-oam-corruption` turns off the first kind (see [Test ROMs](#test-roms)).
 - Colours: the palette is decoded from a model of the PPU's composite signal. On PAL and Dendy, whose PPUs mirror the colour phases on alternate lines, the PAL TV's colour reference turns every hue by 15°, so they get their own palette. Greyscale and colour emphasis work too (greyscale also applies to palette reads through `$2007`): each PPUMASK tint bit attenuates part of the colour signal, as on the real chip, with red and green swapped on PAL and Dendy.
-- Vblank and NMI timing down to the dot, including the `$2002` read race and the odd-frame dot skip. A `$2002` read takes the vblank flag at the start of the CPU's read cycle but the sprite flags at its end, about 2 dots later, as the real CPU's M2 clock does.
+- Vblank and NMI timing down to the dot, including the `$2002` read race and the odd-frame dot skip. A `$2002` read takes the vblank flag at the start of the CPU's read cycle but the sprite flags at its end, about 2 dots later, as the real CPU's M2 clock does, and they pass through a latch first: a sprite 0 hit shows 2 dots after its pixel, an overflow 1 dot after it's found.
 - Open bus: an I/O latch that every register write fills, which write-only registers and undefined bits read back, and whose bits fade after about 600 ms.
 - After reset, writes to `$2000`, `$2001`, `$2005` and `$2006` are ignored until the end of the next vblank, as on a front-loading NES.
 
@@ -76,19 +79,21 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 These pass in full:
 
 - **CPU**: blargg's `instr_test-v5`, `nes_instr_test`, `instr_timing`, `instr_misc`, `cpu_interrupts_v2`, `cpu_dummy_reads`, `cpu_dummy_writes`, `cpu_exec_space` and `cpu_reset`
-- **PPU**: `ppu_vbl_nmi`, `sprite_hit_tests`, `sprite_overflow_tests`, `ppu_open_bus`, `ppu_read_buffer`, `oam_read` and `oam_stress`
+- **PPU**: `ppu_vbl_nmi`, `sprite_hit_tests`, `sprite_overflow_tests` (5.Emulator only with `--no-oam-corruption`, see below), `ppu_open_bus`, `ppu_read_buffer`, `oam_read` and `oam_stress`
 - **APU**: `apu_test`, the 2005 APU tests, `pal_apu_tests` and `apu_reset`
 - **DMA**: `sprdma_and_dmc_dma` and `dmc_dma_during_read4`
 - **Mappers**: `mmc3_test_2` tests 1–5 (and 6 for boards marked as MMC3A in a NES 2.0 header)
 
-[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes 134. The rest are the second half of `$2002` flag timing, the `$2004`/`$2007` stress tests, OAM corruption, and PPU internals such as stale shift registers and mid-fetch address-bus effects.
+[AccuracyCoin](https://github.com/100thCoin/AccuracyCoin), a newer and much stricter collection of 146 tests, passes all 146. Its PPU tests follow the model in [TriCNES](https://github.com/100thCoin/TriCNES), the emulator by AccuracyCoin's author.
+
+The two disagree on one point: blargg's `sprite_overflow_tests/5.Emulator` (test 3) turns rendering off mid-line at a dot that, by AccuracyCoin's hardware measurements, corrupts the OAM row holding sprites it then counts. It passes with `--no-oam-corruption`, which is also Mesen's default.
 
 ## Limitations
 
 - **Unsupported mappers.** The emulator exits with a message for mappers other than 0, 1, 2, 3, 4 and 7.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **PAL colors.** The PAL palette comes from the signal model, not from measurements of a real PAL console, so it may not match one exactly.
-- **Alignment-dependent OAM corruption.** On hardware, toggling rendering mid-line or writing OAMADDR while the PPU is using OAM can corrupt an OAM row, but only on some CPU/PPU clock alignments, which vary from one power-on to the next. This isn't modelled.
+- **One CPU/PPU clock alignment.** A console powers up in one of four alignments between its CPU and PPU clocks, which shift some PPU effects by a dot (which row OAM corruption hits, when a `$2001` write takes effect). The emulator always uses the same one.
 - **Other input devices.** Only standard controllers (and the Famicom microphone) are emulated: no Zapper, Power Pad or Famicom expansion-port devices.
 
 ## Building and running

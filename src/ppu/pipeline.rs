@@ -73,7 +73,7 @@ impl Default for Sprites {
             secondary_full: false,
             secondary_reset: false,
 
-            fetch_y: 0,
+            fetch_y: 0xFF,
             fetch_tile: 0xFF,
             copying: false,
             done: false,
@@ -322,7 +322,7 @@ impl NesPPU {
     fn corrupt_oam(&mut self, row: u8) {
         let row = row as usize;
         for i in 0..8 {
-            self.oam_data[row * 8 + 1] = self.oam_data[i];
+            self.oam_data[row * 8 + i] = self.oam_data[i];
         }
         self.sprites.secondary[row] = self.sprites.secondary[0];
     }
@@ -607,7 +607,7 @@ impl NesPPU {
         }
 
         if let Some((unit, _, _)) = sprite {
-            if unit == 0 && self.sprites.sprite_zero_found && bg_value != 0 && x != 255 {
+            if unit == 0 && self.sprites.sprite_zero_loaded && bg_value != 0 && x != 255 {
                 self.status.set_sprite_zero_hit(true);
             }
         }
