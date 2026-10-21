@@ -1,19 +1,20 @@
 bitflags! {
+    /// PPUMASK ($2001).
     pub struct MaskRegister: u8 {
-        const GREYSCALE               = 0b00000001;
-        const LEFTMOST_8PXL_BACKGROUND  = 0b00000010;
-        const LEFTMOST_8PXL_SPRITE      = 0b00000100;
-        const SHOW_BACKGROUND         = 0b00001000;
-        const SHOW_SPRITES            = 0b00010000;
-        const EMPHASISE_RED           = 0b00100000;
-        const EMPHASISE_GREEN         = 0b01000000;
-        const EMPHASISE_BLUE          = 0b10000000;
+        const GREYSCALE                = 0b0000_0001;
+        const LEFTMOST_8PXL_BACKGROUND = 0b0000_0010;
+        const LEFTMOST_8PXL_SPRITE     = 0b0000_0100;
+        const SHOW_BACKGROUND          = 0b0000_1000;
+        const SHOW_SPRITES             = 0b0001_0000;
+        const EMPHASISE_RED            = 0b0010_0000;
+        const EMPHASISE_GREEN          = 0b0100_0000;
+        const EMPHASISE_BLUE           = 0b1000_0000;
     }
 }
 
 impl MaskRegister {
     pub fn new() -> Self {
-        MaskRegister::from_bits_truncate(0b00000000)
+        MaskRegister::empty()
     }
 
     pub fn is_greyscale(&self) -> bool {
@@ -36,6 +37,8 @@ impl MaskRegister {
         self.contains(MaskRegister::SHOW_SPRITES)
     }
 
+    /// The emphasis bits as an index 0-7 (bit 0 red, 1 green, 2 blue). PAL
+    /// and Dendy PPUs swap the red and green bits.
     pub fn emphasise(&self, swap_red_green: bool) -> usize {
         let bits = (self.bits >> 5) as usize;
         if swap_red_green {

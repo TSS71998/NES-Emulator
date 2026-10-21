@@ -3,7 +3,7 @@ use crate::cpu::Mem;
 use crate::joypad::Joypad;
 use crate::mapper::SharedMapper;
 use crate::ppu::NesPPU;
-use crate::region::{Region, Console};
+use crate::region::{Console, Region};
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -32,6 +32,11 @@ use crate::region::{Region, Console};
 // |_ _ _ _ _ _ _ _| $0100 |               |
 // | Zero Page     |       |               |
 // |_______________| $0000 |_______________|
+
+/// Called once per frame with the finished picture, to read the controllers.
+type GameLoopCallback<'call> = Box<dyn FnMut(&NesPPU, &mut [Joypad; 2]) + 'call>;
+/// Called once per frame with the audio samples; returns the rate adjustment.
+type AudioCallback<'call> = Box<dyn FnMut(&[f32]) -> f64 + 'call>;
 
 pub struct Bus<'call> {
     cpu_vram: [u8; 2048],
@@ -88,8 +93,8 @@ pub struct Bus<'call> {
     /// The CPU's I flag, which masks IRQs (see CPU::sync_irq_mask)
     irq_mask: bool,
 
-    gameloop_callback: Box<dyn FnMut(&NesPPU, &mut [Joypad; 2]) + 'call>,
-    audio_callback: Option<Box<dyn FnMut(&[f32]) -> f64 + 'call>>,
+    gameloop_callback: GameLoopCallback<'call>,
+    audio_callback: Option<AudioCallback<'call>>,
     joypads: [Joypad; 2],
 }
 
@@ -172,6 +177,11 @@ impl<'a> Bus<'a> {
         self.console = console;
     }
 
+    /// See NesPPU::set_oam_row_corruption.
+    pub fn set_oam_row_corruption(&mut self, on: bool) {
+        self.ppu.set_oam_row_corruption(on);
+    }
+
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
         self.cpu_divider = region.cpu_divider() as u64;
@@ -180,10 +190,6 @@ impl<'a> Bus<'a> {
         self.write_point = self.cpu_divider / 2 + 1;
         self.ppu.set_region(region);
         self.apu.set_region(region);
-    }
-
-    pub fn region(&self) -> Region {
-        self.region
     }
 
     pub fn cpu_cycles(&self) -> usize {
@@ -238,11 +244,6 @@ impl<'a> Bus<'a> {
 
     pub fn last_read_halted(&self) -> bool {
         self.last_read_halted
-    } 
-
-    /// See NesPPU::set_oam_row_corruption.
-    pub fn set_oam_row_corruption(&mut self, on: bool) {
-        self.ppu.set_oam_row_corruption(on);
     }
 
     pub fn cpu_write(&mut self, addr: u16, data: u8) {
@@ -451,7 +452,7 @@ impl<'a> Bus<'a> {
                 self.internal_bus = value;
                 value
             }
-            _ => self.mem_read(addr)
+            _ => self.mem_read(addr),
         };
         *prev_addr = register;
         value
@@ -542,7 +543,7 @@ impl<'a> Bus<'a> {
         self.prev_run_irq = false;
     }
 
-    pub fn irq_poll(&self) -> bool{
+    pub fn irq_poll(&self) -> bool {
         self.prev_run_irq
     }
 
@@ -580,14 +581,14 @@ impl<'a> Bus<'a> {
 impl Mem for Bus<'_> {
     fn mem_read(&mut self, addr: u16) -> u8 {
         if addr == 0x4015 {
-            let value =  (self.apu.read_status() & !0x20) | (self.internal_bus & 0x20);
+            let value = (self.apu.read_status() & !0x20) | (self.internal_bus & 0x20);
             self.internal_bus = value;
             return value;
         }
         let value = match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize],
             0x2000..=0x3FFF => self.ppu.cpu_read(addr & 7),
-            
+
             0x4016 | 0x4017 => self.controller_read(addr),
 
             0x4000..=0x401F => self.open_bus,

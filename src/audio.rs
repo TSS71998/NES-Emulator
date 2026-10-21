@@ -84,7 +84,7 @@ impl AudioOutput {
             // Underrun or runaway backlog: resync to the target fill level.
             buffer.samples.clear();
             let pad = target.saturating_sub(in_device + samples.len());
-            buffer.samples.extend(std::iter::repeat(0.0).take(pad));
+            buffer.samples.extend(std::iter::repeat_n(0.0, pad));
             self.smoothed_fill = self.target_samples;
             self.rate_trim = 0.0;
         }

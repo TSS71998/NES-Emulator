@@ -1,19 +1,16 @@
 bitflags! {
+    /// PPUSTATUS ($2002). The low 5 bits aren't driven: a read returns the
+    /// PPU's I/O latch there (see NesPPU::cpu_read).
     pub struct StatusRegister: u8 {
-        const NOTUSED          = 0b00000001;
-        const NOTUSED2         = 0b00000010;
-        const NOTUSED3         = 0b00000100;
-        const NOTUSED4         = 0b00001000;
-        const NOTUSED5         = 0b00010000;
-        const SPRITE_OVERFLOW  = 0b00100000;
-        const SPRITE_ZERO_HIT  = 0b01000000;
-        const VBLANK_STARTED   = 0b10000000;
+        const SPRITE_OVERFLOW = 0b0010_0000;
+        const SPRITE_ZERO_HIT = 0b0100_0000;
+        const VBLANK_STARTED  = 0b1000_0000;
     }
 }
 
 impl StatusRegister {
     pub fn new() -> Self {
-        StatusRegister::from_bits_truncate(0b00000000)
+        StatusRegister::empty()
     }
 
     pub fn set_vblank_status(&mut self, status: bool) {

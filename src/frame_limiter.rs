@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
+/// How long before the deadline to stop sleeping and spin instead, since
+/// sleep can overshoot.
 const SPIN_MARGIN: Duration = Duration::from_micros(2000);
 
+/// Paces the emulator to the console's frame rate.
 pub struct FrameLimiter {
     frame_time: Duration,
     next_frame: Instant,
@@ -16,6 +19,8 @@ impl FrameLimiter {
         }
     }
 
+    /// Waits until the next frame is due. If the emulator falls more than 4
+    /// frames behind, it resyncs instead of rushing to catch up.
     pub fn wait(&mut self) {
         let now = Instant::now();
 

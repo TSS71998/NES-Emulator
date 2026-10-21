@@ -6,7 +6,6 @@ const PRG_BANK: usize = 0x8000;
 /// Mapper 7: AxROM (ANROM, AMROM, AOROM). Writes to $8000-$FFFF select a
 /// 32 KiB PRG bank (bits 0-2) and which 1 KiB of VRAM all four nametables
 /// show (bit 4). CHR is 8 KiB of RAM.
-
 pub struct Axrom {
     prg_rom: Vec<u8>,
     chr: Chr,

@@ -100,7 +100,7 @@ The two disagree on one point: blargg's `sprite_overflow_tests/5.Emulator` (test
 
 You need:
 
-- **Rust 1.85 or newer** (the crate uses the 2024 edition).
+- **Rust 1.85 or newer** (the crate uses the 2024 edition; `rust-version` in `Cargo.toml` says so, so Cargo gives a clear error on older compilers).
 - **SDL2 development libraries:**
   - Linux: `sudo apt install libsdl2-dev`
   - macOS: `brew install sdl2`
@@ -117,7 +117,7 @@ cargo run --release -- --console famicom game.nes
 
 Pass the ROM to play as an argument. A bare file name is looked up in the current folder, then in `roms/`. With no argument it loads `Alter_Ego.nes`.
 
-Build with `--release`. An unoptimised debug build may not keep up with real time, and then the audio crackles.
+`--release` gives the fastest build (about 4 ms per frame, a quarter of the 16.7 ms a frame lasts). A plain `cargo run` also keeps up: `Cargo.toml` builds the dev profile at `opt-level = 1`, which is still debuggable but runs at about 5 ms per frame instead of 30 ms. Without it, the emulator falls behind real time and the audio crackles.
 
  ## Controls 
 | NES button | Player 1 keys | Player 2 keys | Gamepad |

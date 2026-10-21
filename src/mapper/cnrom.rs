@@ -5,7 +5,6 @@ const CHR_BANK: usize = 0x2000;
 
 /// Mapper 3: CNROM. NROM-style fixed 16 or 32 KiB PRG, plus an 8 KiB CHR-ROM
 /// bank selected by any write to $8000-$FFFF.
-
 pub struct Cnrom {
     prg_rom: Vec<u8>,
     chr: Chr,

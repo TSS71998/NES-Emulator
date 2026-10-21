@@ -6,7 +6,6 @@ const PRG_BANK: usize = 0x4000;
 /// Mapper 2: UxROM (UNROM, UOROM). A switchable 16 KiB PRG bank at $8000
 /// and the last bank fixed at $C000; any write to $8000-$FFFF selects the
 /// bank. CHR is usually 8 KiB of RAM.
-
 pub struct Uxrom {
     prg_rom: Vec<u8>,
     chr: Chr,

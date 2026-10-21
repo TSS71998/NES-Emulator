@@ -2,10 +2,16 @@
 name = "nes_emulator"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 bitflags = "1.2.1"
 sdl2 = "0.38.0"
+
+# Plain `cargo run` builds are unoptimized and run at under half speed;
+# opt-level 1 keeps them full speed and still debuggable.
+[profile.dev]
+opt-level = 1
 
 [profile.release]
 lto = "fat"

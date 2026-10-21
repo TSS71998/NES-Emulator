@@ -24,7 +24,7 @@ pub fn trace(cpu: &CPU) -> String {
 
     let tmp = match ops.len {
         1 => match ops.code {
-            0x0A | 0x4A | 0x2A | 0x6A => format!("A "),
+            0x0A | 0x4A | 0x2A | 0x6A => "A ".to_string(),
             _ => String::from(""),
         },
         2 => {
@@ -173,8 +173,8 @@ mod test {
         bus.mem_write(100, 0x11);
         bus.mem_write(101, 0x33);
 
-        bus.mem_write(0x33, 00);
-        bus.mem_write(0x34, 04);
+        bus.mem_write(0x33, 0x00);
+        bus.mem_write(0x34, 0x04);
 
         bus.mem_write(0x400, 0xAA);
 

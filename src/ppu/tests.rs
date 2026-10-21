@@ -13,6 +13,7 @@ fn read(ppu: &mut NesPPU) -> u8 {
     ppu.tick(6);
     value
 }
+
 #[test]
 fn test_ppu_vram_writes() {
     let mut ppu = NesPPU::new_empty_rom();
@@ -223,7 +224,7 @@ fn test_sprite_row_addr() {
     ppu.write_to_ctrl(0b0010_0000); // 8x16; table comes from the tile index
     assert_eq!(ppu.sprite_row_addr(0x03, 0), 0x1000 + 0x20);
     assert_eq!(ppu.sprite_row_addr(0x03, 9), 0x1000 + 0x30 + 1);
-    assert_eq!(ppu.sprite_row_addr(0x04, 15), 0x0000 + 0x50 + 7);
+    assert_eq!(ppu.sprite_row_addr(0x04, 15), 0x50 + 7);
 }
 
 #[test]
@@ -243,6 +244,19 @@ fn test_palette_mirror_write_is_masked() {
 }
 
 #[test]
+fn test_ppu_data_read_fills_the_buffer_a_few_dots_later() {
+    let mut ppu = NesPPU::new_empty_rom();
+    ppu.vram[0x0305] = 0x66;
+    set_addr(&mut ppu, 0x2305);
+    ppu.cpu_read(7);
+    assert_eq!(ppu.internal_data_buf, 0, "not yet");
+    assert_eq!(ppu.vram_addr(), 0x2305);
+    ppu.tick(DATA_READ_ALE_DOTS as u8 + 2);
+    assert_eq!(ppu.internal_data_buf, 0x66);
+    assert_eq!(ppu.vram_addr(), 0x2306);
+}
+
+#[test]
 fn test_palette_mirrors() {
     let mut ppu = NesPPU::new_empty_rom();
     set_addr(&mut ppu, 0x3F30); // mirror of $3F10, which mirrors $3F00
@@ -255,6 +269,7 @@ fn test_palette_mirrors() {
 
 // $2005/$2006 write into t, exactly as on https://www.nesdev.org/wiki/PPU_scrolling
 #[test]
+#[allow(clippy::unusual_byte_groupings)] // t's fields: fine Y, nametable, coarse Y, coarse X
 fn test_scroll_and_addr_writes_share_t() {
     let mut ppu = NesPPU::new_empty_rom();
     ppu.write_to_ctrl(0b10); // nametable 2
@@ -490,17 +505,4 @@ fn test_palette_reads_honour_greyscale() {
     ppu.write_to_mask(0x00);
     set_addr(&mut ppu, 0x3F1D);
     assert_eq!(read(&mut ppu), 0x16);
-}
-
-#[test]
-fn test_ppu_data_read_fills_the_buffer_a_few_dots_later() {
-    let mut ppu = NesPPU::new_empty_rom();
-    ppu.vram[0x0305] = 0x66;
-    set_addr(&mut ppu, 0x2305);
-    ppu.cpu_read(7);
-    assert_eq!(ppu.internal_data_buf, 0, "not yet");
-    assert_eq!(ppu.vram_addr(), 0x2305);
-    ppu.tick(DATA_READ_ALE_DOTS as u8 + 2);
-    assert_eq!(ppu.internal_data_buf, 0x66);
-    assert_eq!(ppu.vram_addr(), 0x2306);
 }

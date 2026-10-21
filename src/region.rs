@@ -211,7 +211,7 @@ pub enum Console {
     TopLoader,
     /// The Famicom: reset only resets the CPU, and controller 2 has a
     /// microphone, read on bit 2 of $4016.
-    Famicom
+    Famicom,
 }
 
 impl Console {
@@ -228,7 +228,7 @@ impl Console {
         match self {
             Console::Nes => "NES",
             Console::TopLoader => "top-loading NES",
-            Console::Famicom => "Famicom"
+            Console::Famicom => "Famicom",
         }
     }
 

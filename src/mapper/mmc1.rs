@@ -8,13 +8,12 @@ use crate::cartridge::{Mirroring, Rom};
 /// which register receives the value. Writing a value with bit 7 set resets
 /// the shift register.
 ///
-/// | Register | Address     | Bits                                                   |
-/// |----------|-------------|--------------------------------------------------------|
-/// | Control  | $8000-$9FFF | 0-1 mirroring, 2-3 PRG bank mode, 4 CHR bank mode       |
+/// | Register | Address     | Bits                                                     |
+/// |----------|-------------|----------------------------------------------------------|
+/// | Control  | $8000-$9FFF | 0-1 mirroring, 2-3 PRG bank mode, 4 CHR bank mode        |
 /// | CHR 0    | $A000-$BFFF | 4 KiB CHR bank at $0000 (or 8 KiB bank, low bit ignored) |
 /// | CHR 1    | $C000-$DFFF | 4 KiB CHR bank at $1000 (ignored in 8 KiB mode)          |
-/// | PRG      | $E000-$FFFF | 0-3 16 KiB PRG bank, 4 PRG-RAM disable         
-
+/// | PRG      | $E000-$FFFF | 0-3 16 KiB PRG bank, 4 PRG-RAM disable                   |
 pub struct Mmc1 {
     prg_rom: Vec<u8>,
     prg_ram: Vec<u8>,

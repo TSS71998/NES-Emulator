@@ -164,17 +164,17 @@ impl Rom {
         Ok(Rom {
             prg_rom: raw[prg_rom_start..(prg_rom_start + prg_rom_size)].to_vec(),
             chr_rom: raw[chr_rom_start..(chr_rom_start + chr_rom_size)].to_vec(),
-            mapper: mapper,
-            submapper: submapper,
-            screen_mirroring: screen_mirroring,
-            format: format,
-            has_battery: has_battery,
-            console_type: console_type,
-            timing: timing,
-            prg_ram_size: prg_ram_size,
-            prg_nvram_size: prg_nvram_size,
-            chr_ram_size: chr_ram_size,
-            chr_nvram_size: chr_nvram_size,
+            mapper,
+            submapper,
+            screen_mirroring,
+            format,
+            has_battery,
+            console_type,
+            timing,
+            prg_ram_size,
+            prg_nvram_size,
+            chr_ram_size,
+            chr_nvram_size,
         })
     }
 }
@@ -192,7 +192,7 @@ fn nes2_sizes_fit(raw: &[u8]) -> bool {
     let prg = nes2_rom_size(raw[4], raw[9] & 0x0f, PRG_ROM_PAGE_SIZE);
     let chr = nes2_rom_size(raw[5], raw[9] >> 4, CHR_ROM_PAGE_SIZE);
     match (prg, chr) {
-        (Ok(prg), Ok(chr)) => rom_end(trainer_size, prg, chr).map_or(false, |end| end <= raw.len()),
+        (Ok(prg), Ok(chr)) => rom_end(trainer_size, prg, chr).is_some_and(|end| end <= raw.len()),
         _ => false,
     }
 }
@@ -271,7 +271,7 @@ pub mod test {
             ],
             trainer: None,
             prg_rom: prg_rom_contents,
-            chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            chr_rom: vec![2; CHR_ROM_PAGE_SIZE],
         });
 
         Rom::new(&test_rom).unwrap()
@@ -285,12 +285,12 @@ pub mod test {
             ],
             trainer: None,
             prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
-            chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            chr_rom: vec![2; CHR_ROM_PAGE_SIZE],
         });
 
         let rom: Rom = Rom::new(&test_rom).unwrap();
 
-        assert_eq!(rom.chr_rom, vec!(2; 1 * CHR_ROM_PAGE_SIZE));
+        assert_eq!(rom.chr_rom, vec!(2; CHR_ROM_PAGE_SIZE));
         assert_eq!(rom.prg_rom, vec!(1; 2 * PRG_ROM_PAGE_SIZE));
         assert_eq!(rom.mapper, 3);
         assert_eq!(rom.screen_mirroring, Mirroring::Vertical);
@@ -314,7 +314,7 @@ pub mod test {
             ],
             trainer: None,
             prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
-            chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            chr_rom: vec![2; CHR_ROM_PAGE_SIZE],
         });
 
         let rom = Rom::new(&test_rom).unwrap();
@@ -323,7 +323,7 @@ pub mod test {
         assert_eq!(rom.mapper, 0x103);
         assert_eq!(rom.submapper, 2);
         assert_eq!(rom.prg_rom, vec!(1; 2 * PRG_ROM_PAGE_SIZE));
-        assert_eq!(rom.chr_rom, vec!(2; 1 * CHR_ROM_PAGE_SIZE));
+        assert_eq!(rom.chr_rom, vec!(2; CHR_ROM_PAGE_SIZE));
         assert_eq!(rom.screen_mirroring, Mirroring::Vertical);
         assert_eq!(rom.prg_ram_size, 0);
         assert_eq!(rom.prg_nvram_size, 8192);
@@ -375,7 +375,7 @@ pub mod test {
             ],
             trainer: None,
             prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
-            chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            chr_rom: vec![2; CHR_ROM_PAGE_SIZE],
         });
 
         let rom = Rom::new(&test_rom).unwrap();
@@ -393,7 +393,7 @@ pub mod test {
             header,
             trainer: None,
             prg_rom: vec![1; 2 * PRG_ROM_PAGE_SIZE],
-            chr_rom: vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            chr_rom: vec![2; CHR_ROM_PAGE_SIZE],
         });
 
         let rom = Rom::new(&test_rom).unwrap();
@@ -410,7 +410,7 @@ pub mod test {
                 0x4E, 0x45, 0x53, 0x1A, 0x02, 0x01, 0x31, 00, 00, 00, 00, 00, 00, 00, 00, 00,
             ],
             trainer: None,
-            prg_rom: vec![1; 1 * PRG_ROM_PAGE_SIZE], // header says 2 pages
+            prg_rom: vec![1; PRG_ROM_PAGE_SIZE], // header says 2 pages
             chr_rom: vec![],
         });
 
@@ -420,7 +420,7 @@ pub mod test {
 
     #[test]
     fn test_not_a_nes_file() {
-        assert!(Rom::new(&vec![0u8; 64]).is_err());
-        assert!(Rom::new(&vec![0x4E, 0x45, 0x53]).is_err());
+        assert!(Rom::new(&[0u8; 64]).is_err());
+        assert!(Rom::new(&[0x4E, 0x45, 0x53]).is_err());
     }
 }

@@ -1,21 +1,31 @@
 bitflags! {
+    /// The buttons, in the order the controller reports them (A first).
     pub struct JoypadButton: u8 {
-        const RIGHT             = 0b10000000;
-        const LEFT              = 0b01000000;
-        const DOWN              = 0b00100000;
-        const UP                = 0b00010000;
-        const START             = 0b00001000;
-        const SELECT            = 0b00000100;
-        const BUTTON_B          = 0b00000010;
-        const BUTTON_A          = 0b00000001;
+        const RIGHT    = 0b1000_0000;
+        const LEFT     = 0b0100_0000;
+        const DOWN     = 0b0010_0000;
+        const UP       = 0b0001_0000;
+        const START    = 0b0000_1000;
+        const SELECT   = 0b0000_0100;
+        const BUTTON_B = 0b0000_0010;
+        const BUTTON_A = 0b0000_0001;
     }
 }
 
+/// A standard controller: an 8-bit shift register loaded with the buttons
+/// while the strobe line ($4016 bit 0) is high, read out one bit at a time.
 pub struct Joypad {
     strobe: bool,
     button_index: u8,
     button_status: JoypadButton,
-    pub microphone: bool
+    /// The Famicom's controller 2 microphone (read on $4016 bit 2).
+    pub microphone: bool,
+}
+
+impl Default for Joypad {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Joypad {
@@ -23,11 +33,13 @@ impl Joypad {
         Joypad {
             strobe: false,
             button_index: 0,
-            button_status: JoypadButton::from_bits_truncate(0),
-            microphone: false
+            button_status: JoypadButton::empty(),
+            microphone: false,
         }
     }
 
+    /// The strobe line: while it's high the controller keeps reloading, so
+    /// reads return button A.
     pub fn write(&mut self, data: u8) {
         self.strobe = data & 1 == 1;
         if self.strobe {
@@ -35,15 +47,17 @@ impl Joypad {
         }
     }
 
+    /// The next button on bit 0 (1 = pressed). After all 8, an official
+    /// controller returns 1s.
     pub fn read(&mut self) -> u8 {
         if self.button_index > 7 {
             return 1;
         }
-        let response = (self.button_status.bits & (1 << self.button_index)) >> self.button_index;
-        if !self.strobe && self.button_index <= 7 {
+        let bit = (self.button_status.bits >> self.button_index) & 1;
+        if !self.strobe {
             self.button_index += 1;
         }
-        response
+        bit
     }
 
     pub fn set_button_pressed_status(&mut self, button: JoypadButton, pressed: bool) {

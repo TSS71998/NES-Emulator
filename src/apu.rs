@@ -367,7 +367,7 @@ struct Dmc {
     start_delay: u8,
     disable_delay: u8,
     stop_dma: bool,
-    reloaded: bool
+    reloaded: bool,
 }
 
 impl Dmc {
@@ -390,7 +390,7 @@ impl Dmc {
             start_delay: 0,
             disable_delay: 0,
             stop_dma: false,
-            reloaded: false
+            reloaded: false,
         }
     }
 
@@ -779,8 +779,8 @@ impl APU {
             frame_counter: FrameCounter::new(Region::Ntsc.frame_sequencer()),
             length_writes_pending: false,
             odd_cycle: false,
-            pulse_table: pulse_table,
-            tnd_table: tnd_table,
+            pulse_table,
+            tnd_table,
             region: Region::Ntsc,
             cpu_clock: Region::Ntsc.cpu_clock_hz(),
             sample_rate: sample_rate as f64,

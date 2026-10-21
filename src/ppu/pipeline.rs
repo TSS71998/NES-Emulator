@@ -26,40 +26,55 @@ pub(super) struct Background {
     pattern_high: u16,
     attribute_low: u16,
     attribute_high: u16,
+    /// The current tile's palette, which the attribute shifters shift in.
     attribute_latch: u8,
-    load_pending: bool
+    /// A tile's high pattern byte was fetched, so the shifters take the new
+    /// tile on the next dot. (If rendering was off for that fetch, they
+    /// don't.)
+    load_pending: bool,
 }
 
+/// One of the 8 sprite output units.
 #[derive(Clone, Copy, Default)]
 struct SpriteUnit {
     low: u8,
     high: u8,
     attr: u8,
-    counter: u8
+    /// Dots until the sprite starts: its X position, counted down.
+    counter: u8,
 }
 
 pub(super) struct Sprites {
     secondary: [u8; 32],
+    /// Whether the first sprite found by the evaluation (on dot 66) was in
+    /// range: "sprite 0" for the next line.
     sprite_zero_found: bool,
+    /// Whether unit 0 holds that sprite 0, for this line's sprite 0 hits.
     sprite_zero_loaded: bool,
     /// The byte last read from OAM or secondary OAM; $2004 returns it while
     /// the PPU is rendering.
     pub(super) buffer: u8,
-    /// Evaluation state: the next secondary OAM byte to write, the sprite
-    /// (n) and byte (m) OAMADDR is on, whether the sprite just read is being
-    /// copied, whether all 64 sprites have been looked at, and the 3 extra
-    /// reads after an overflow.
+    /// The secondary OAM ("OAM2") address, 0-31. When it wraps (secondary
+    /// OAM full) `secondary_full` is raised, and freezes it at 0 until the
+    /// reset signal: rendering on during dot 63, 255 or 339 resets both on
+    /// the next dot.
     secondary_addr: u8,
     secondary_full: bool,
     secondary_reset: bool,
-
+    /// The sprite whose unit is being loaded: its Y and tile.
     fetch_y: u8,
     fetch_tile: u8,
-
+    /// Evaluation state: whether the sprite just read is being copied,
+    /// whether all 64 sprites have been looked at, and the 3 extra reads
+    /// after an overflow.
     copying: bool,
     done: bool,
     overflow_reads: u8,
-    units: [SpriteUnit; 8]
+    units: [SpriteUnit; 8],
+    /// Bit n set: unit n may still have pattern bits to shift out. A unit
+    /// whose shift registers are empty can't draw, and shifting it changes
+    /// nothing, so those units are skipped (its counter still runs).
+    drawing: u8,
 }
 
 impl Default for Sprites {
@@ -72,18 +87,29 @@ impl Default for Sprites {
             secondary_addr: 0,
             secondary_full: false,
             secondary_reset: false,
-
             fetch_y: 0xFF,
             fetch_tile: 0xFF,
             copying: false,
             done: false,
             overflow_reads: 0,
-            units: [SpriteUnit::default(); 8]
+            units: [SpriteUnit::default(); 8],
+            drawing: 0,
         }
     }
 }
 
 impl Sprites {
+    /// Updates unit `slot`'s bit in `drawing` from its shift registers.
+    fn update_drawing(&mut self, slot: usize) {
+        let unit = &self.units[slot];
+        if unit.low | unit.high != 0 {
+            self.drawing |= 1 << slot;
+        } else {
+            self.drawing &= !(1 << slot);
+        }
+    }
+
+    /// Moves the secondary OAM address on, unless it's frozen.
     fn increment_secondary(&mut self) {
         if !self.secondary_full {
             self.secondary_addr += 1;
@@ -96,7 +122,7 @@ impl Sprites {
 }
 
 impl NesPPU {
-        pub(super) fn render_dot(&mut self) {
+    pub(super) fn render_dot(&mut self) {
         let dot = self.dot;
         let visible = self.scanline < 240;
         // Shifting and pixel output follow the rendering flag; the memory
@@ -118,7 +144,11 @@ impl NesPPU {
             && self.oam_addr >= 8
             && self.region != Region::Pal
         {
-            // The 2C02 bug: ... (unchanged)
+            // The 2C02 bug: when rendering starts, the OAM row (8 bytes)
+            // OAMADDR points to is copied over row 0, so if OAMADDR is 8 or
+            // more, sprites 0 and 1 are overwritten. Reliable on the common
+            // 2C02 revisions (C, E, G, H) and the Dendy; the PAL 2C07
+            // doesn't do it.
             let i = dot as usize - 1;
             self.oam_data[i] = self.oam_data[(self.oam_addr & 0xF8) as usize + i];
         }
@@ -199,6 +229,38 @@ impl NesPPU {
         }
     }
 
+    /// Rendering was turned off on a rendering line. Secondary OAM's
+    /// address at that moment picks an OAM row (8 bytes) to corrupt when
+    /// rendering next runs; during evaluation (dots 65-256) it's rounded up
+    /// to a whole sprite.
+    pub(super) fn seed_oam_corruption(&mut self) {
+        if self.oam_corruption.is_some() {
+            return;
+        }
+        let mut row = self.sprites.secondary_addr;
+        if (65..=256).contains(&self.dot) && row & 3 != 0 {
+            row = ((row & !3) + 4) & 0x1F;
+        }
+        self.oam_corruption = Some(row);
+    }
+
+    /// OAM corruption: on the first rendering dot after rendering was
+    /// turned off mid-line, OAM row 0 is copied over the seeded row, and
+    /// secondary OAM's byte 0 over the seeded byte (AccuracyCoin "OAM
+    /// Corruption").
+    fn corrupt_oam(&mut self, row: u8) {
+        let row = row as usize;
+        for i in 0..8 {
+            self.oam_data[row * 8 + i] = self.oam_data[i];
+        }
+        self.sprites.secondary[row] = self.sprites.secondary[0];
+    }
+
+    /// What comes in at the bottom: 0 for the low pattern plane, 1 for the
+    /// high one, and the attribute latch's bits for the palette. Normally
+    /// it's overwritten by the next tile before it's drawn, but a shifter
+    /// that isn't reloaded (rendering turned off and on at the right time)
+    /// draws it (AccuracyCoin "BG Serial In").
     fn shift_background(&mut self) {
         let bg = &mut self.bg;
         bg.pattern_low <<= 1;
@@ -248,7 +310,7 @@ impl NesPPU {
                 self.bg.load_pending = true;
                 self.increment_coarse_x();
             }
-        } 
+        }
     }
 
     fn nametable_addr(&self) -> u16 {
@@ -263,68 +325,6 @@ impl NesPPU {
     fn background_pattern_addr(&self) -> u16 {
         let fine_y = (self.v >> 12) & 0b111;
         self.ctrl.bknd_pattern_addr() + self.bg.next_tile as u16 * 16 + fine_y
-    }
-
-    pub(super) fn increment_coarse_x(&mut self) {
-        if self.v & 0x001F == 31 {
-            self.v &= !0x001F;
-            self.v ^= 0x0400; // next horizontal nametable
-        } else {
-            self.v += 1;
-        }
-    }
-
-    pub(super) fn increment_y(&mut self) {
-        if self.v & 0x7000 != 0x7000 {
-            self.v += 0x1000; // fine Y
-            return;
-        }
-        self.v &= !0x7000;
-        let mut coarse_y = (self.v & 0x03E0) >> 5;
-        if coarse_y == 29 {
-            coarse_y = 0;
-            self.v ^= 0x0800; // next vertical nametable
-        } else if coarse_y == 31 {
-            coarse_y = 0; // rows 30-31 are attribute data; wraps without switching
-        } else {
-            coarse_y += 1;
-        }
-        self.v = (self.v & !0x03E0) | (coarse_y << 5);
-    }
-
-    fn copy_horizontal(&mut self) {
-        self.v = (self.v & !0x041F) | (self.t & 0x041F);
-    }
-
-    fn copy_vertical(&mut self) {
-        self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
-    }
-
-    /// Rendering was turned off on a rendering line. Secondary OAM's
-    /// address at that moment picks an OAM row (8 bytes) to corrupt when
-    /// rendering next runs; during evaluation (dots 65-256) it's rounded up
-    /// to a whole sprite.
-    pub(super) fn seed_oam_corruption(&mut self) {
-        if self.oam_corruption.is_some() {
-            return;
-        }
-        let mut row = self.sprites.secondary_addr;
-        if (65..=256).contains(&self.dot) && row & 3 != 0 {
-            row = ((row & !3) + 4) & 0x1F;
-        }
-        self.oam_corruption = Some(row);
-    }
-
-    /// OAM corruption: on the first rendering dot after rendering was
-    /// turned off mid-line, OAM row 0 is copied over the seeded row, and
-    /// secondary OAM's byte 0 over the seeded byte (AccuracyCoin "OAM
-    /// Corruption").
-    fn corrupt_oam(&mut self, row: u8) {
-        let row = row as usize;
-        for i in 0..8 {
-            self.oam_data[row * 8 + i] = self.oam_data[i];
-        }
-        self.sprites.secondary[row] = self.sprites.secondary[0];
     }
 
     /// The first dot of a memory access (ALE): `addr` goes on the bus and
@@ -364,6 +364,41 @@ impl NesPPU {
         data
     }
 
+    pub(super) fn increment_coarse_x(&mut self) {
+        if self.v & 0x001F == 31 {
+            self.v &= !0x001F;
+            self.v ^= 0x0400; // next horizontal nametable
+        } else {
+            self.v += 1;
+        }
+    }
+
+    pub(super) fn increment_y(&mut self) {
+        if self.v & 0x7000 != 0x7000 {
+            self.v += 0x1000; // fine Y
+            return;
+        }
+        self.v &= !0x7000;
+        let mut coarse_y = (self.v & 0x03E0) >> 5;
+        if coarse_y == 29 {
+            coarse_y = 0;
+            self.v ^= 0x0800; // next vertical nametable
+        } else if coarse_y == 31 {
+            coarse_y = 0; // rows 30-31 are attribute data; wraps without switching
+        } else {
+            coarse_y += 1;
+        }
+        self.v = (self.v & !0x03E0) | (coarse_y << 5);
+    }
+
+    fn copy_horizontal(&mut self) {
+        self.v = (self.v & !0x041F) | (self.t & 0x041F);
+    }
+
+    fn copy_vertical(&mut self) {
+        self.v = (self.v & !0x7BE0) | (self.t & 0x7BE0);
+    }
+
     /// One dot of sprite evaluation (dots 1-256 of a visible line), which
     /// finds the first 8 sprites in OAM that cover the next line.
     ///
@@ -394,6 +429,7 @@ impl NesPPU {
         let sprites = &mut self.sprites;
 
         if dot <= 64 {
+            // odd dots read $FF, even dots write it to secondary OAM
             if dot & 1 == 1 {
                 sprites.buffer = 0xFF;
                 if dot == 1 {
@@ -424,9 +460,11 @@ impl NesPPU {
         let mut overflow = false;
 
         if sprites.done {
+            // all 64 looked at: OAMADDR keeps moving, and the even dots read
+            // secondary OAM instead of writing it
             addr = (addr + 4) & !3;
             sprites.buffer = sprites.secondary[sprites.secondary_addr as usize];
-        } else if !sprites.secondary_full { 
+        } else if !sprites.secondary_full {
             sprites.secondary[sprites.secondary_addr as usize] = value;
             if !sprites.copying {
                 if in_range(value) {
@@ -478,7 +516,7 @@ impl NesPPU {
         }
     }
 
-        /// Dots 257-320: 8 dots per sprite unit, reading its secondary OAM
+    /// Dots 257-320: 8 dots per sprite unit, reading its secondary OAM
     /// entry through the secondary OAM address, one byte a dot (the address
     /// moves on dots 1-3 and 8 of the 8): Y, tile, attribute and X, latched
     /// on dots 2-5. Meanwhile the bus does two garbage nametable fetches and
@@ -523,12 +561,14 @@ impl NesPPU {
                 let addr = self.sprite_fetch_addr(slot);
                 let byte = self.bus_read(addr);
                 self.sprites.units[slot].low = self.sprite_pattern(slot, byte);
+                self.sprites.update_drawing(slot);
             }
             6 => self.bus_latch(self.sprite_fetch_addr(slot) + 8),
             _ => {
                 let addr = self.sprite_fetch_addr(slot) + 8;
                 let byte = self.bus_read(addr);
                 self.sprites.units[slot].high = self.sprite_pattern(slot, byte);
+                self.sprites.update_drawing(slot);
                 self.sprites.increment_secondary();
             }
         }
@@ -568,12 +608,16 @@ impl NesPPU {
     /// Dots 1-256: each unit counts down to its sprite's X position, then
     /// shifts its pattern out (only while rendering).
     fn clock_sprite_units(&mut self, rendering: bool) {
-        for unit in self.sprites.units.iter_mut() {
+        let sprites = &mut self.sprites;
+        for (i, unit) in sprites.units.iter_mut().enumerate() {
             if unit.counter > 0 {
                 unit.counter -= 1;
-            } else if rendering {
+            } else if rendering && sprites.drawing & (1 << i) != 0 {
                 unit.low <<= 1;
                 unit.high <<= 1;
+                if unit.low | unit.high == 0 {
+                    sprites.drawing &= !(1 << i);
+                }
             }
         }
     }
@@ -581,6 +625,9 @@ impl NesPPU {
     /// The first opaque pixel among the sprite units that have started:
     /// (unit, value, attributes).
     fn sprite_pixel(&self) -> Option<(usize, u8, u8)> {
+        if self.sprites.drawing == 0 {
+            return None;
+        }
         self.sprites.units.iter().enumerate().find_map(|(i, unit)| {
             let value = (unit.high >> 7) << 1 | unit.low >> 7;
             (unit.counter == 0 && value != 0).then_some((i, value, unit.attr))
@@ -618,12 +665,12 @@ impl NesPPU {
             (b, None) => bg_palette << 2 | b,
             (b, Some((_, s, attr))) => {
                 if attr & 0x20 != 0 {
-                     bg_palette << 2 | b
-                 } else {
+                    bg_palette << 2 | b
+                } else {
                     0x10 | (attr & 3) << 2 | s
-                 }
-             }
-         };
+                }
+            }
+        };
         let colour = self.palette_table[palette_index(palette_addr as u16)];
         self.put_pixel(x, colour);
     }
@@ -641,16 +688,10 @@ impl NesPPU {
         self.put_pixel(x, colour);
     }
 
+    /// Writes a palette colour to the frame, with PPUMASK's greyscale and
+    /// emphasis applied.
     fn put_pixel(&mut self, x: usize, color: u8) {
-        let color = if self.mask.is_greyscale() {
-            color & 0x30
-        } else {
-            color
-        };
-        let emphasis = self
-            .mask
-            .emphasise(matches!(self.region, Region::Pal | Region::Dendy));
-        let rgb = self.palette[emphasis << 6 | (color & 0x3F) as usize];
+        let rgb = self.palette[self.emphasis_offset | (color & self.greyscale_mask) as usize];
         let i = (self.scanline as usize * 256 + x) * 3;
         self.frame.data[i] = rgb.0;
         self.frame.data[i + 1] = rgb.1;
@@ -662,7 +703,7 @@ impl NesPPU {
 mod test {
     use super::*;
     use crate::ppu::PPU;
-    use crate::render::palette::{SYSTEM_PALETTE, NTSC_PALETTE, PAL_PALETTE};
+    use crate::render::palette::{NTSC_PALETTE, PAL_PALETTE, SYSTEM_PALETTE};
 
     const RED: u8 = 0x16;
     const GREEN: u8 = 0x2A;
@@ -740,10 +781,7 @@ mod test {
             pixel(&mut ppu, 100, 100),
             NTSC_PALETTE[1 << 6 | GREEN as usize]
         );
-        assert_eq!(
-            pixel(&mut ppu, 22, 10),
-            NTSC_PALETTE[1 << 6 | RED as usize]
-        );
+        assert_eq!(pixel(&mut ppu, 22, 10), NTSC_PALETTE[1 << 6 | RED as usize]);
         ppu.write_to_mask(0b1111_1111); // all three, greyscale on
         assert_eq!(
             pixel(&mut ppu, 100, 100),
@@ -774,13 +812,13 @@ mod test {
     #[test]
     fn test_lower_oam_index_wins_even_when_behind_background() {
         let mut ppu = test_ppu();
-        ppu.vram[1 * 32 + 2] = 1; // opaque background tile at x 16-23, y 8-15
+        ppu.vram[32 + 2] = 1; // opaque background tile at x 16-23, y 8-15
         sprite(&mut ppu, 0, 16, 9, 0b0010_0000); // behind background, red
         sprite(&mut ppu, 1, 16, 9, 0b0000_0001); // in front, blue
         // sprite 0 wins the pixel, then hides behind the background
         assert_eq!(pixel(&mut ppu, 20, 10), colour(GREEN));
         // where the background is transparent, sprite 0 shows
-        ppu.vram[1 * 32 + 2] = 0;
+        ppu.vram[32 + 2] = 0;
         assert_eq!(pixel(&mut ppu, 20, 10), colour(RED));
     }
 
@@ -873,7 +911,7 @@ mod test {
         assert_eq!(at(42), colour(RED), "sprite 1 is found");
     }
 
-        /// Writes sprites as raw bytes starting at OAM address `start`, so they
+    /// Writes sprites as raw bytes starting at OAM address `start`, so they
     /// can be misaligned.
     fn raw_sprites(ppu: &mut NesPPU, start: usize, bytes: &[u8]) {
         ppu.oam_data = [0xFF; 256];
@@ -1051,7 +1089,7 @@ mod test {
         assert_eq!((ppu.scanline, ppu.dot), (44, 85)); // pixel 84 is output at dot 85
     }
 
-        #[test]
+    #[test]
     fn test_sprite_counters_run_while_rendering_is_off() {
         let mut ppu = test_ppu();
         ppu.sprites.units[0] = SpriteUnit {
@@ -1060,6 +1098,7 @@ mod test {
             attr: 0,
             counter: 2,
         };
+        ppu.sprites.drawing = 0b1;
         ppu.clock_sprite_units(false);
         ppu.clock_sprite_units(false);
         assert_eq!(ppu.sprites.units[0].counter, 0, "counted down anyway");

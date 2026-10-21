@@ -13,13 +13,12 @@ pub mod region;
 pub mod render;
 pub mod trace;
 
-
 use audio::AudioOutput;
 use bus::Bus;
 use cartridge::Rom;
 use cpu::CPU;
-use input::Input;
 use frame_limiter::FrameLimiter;
+use input::Input;
 use mapper::SharedMapper;
 use ppu::NesPPU;
 use region::{Console, Region};
@@ -189,7 +188,7 @@ struct Args {
     rom: String,
     region: Option<Region>,
     console: Option<Console>,
-    no_oam_corruption: bool
+    no_oam_corruption: bool,
 }
 
 /// `nes_emulator [--region ntsc|pal|dendy] [--console nes|toploader|famicom]
@@ -199,9 +198,7 @@ fn parse_args() -> Args {
     let mut region = None;
     let mut console = None;
     let mut no_oam_corruption = false;
-
     let mut args = std::env::args().skip(1);
-
     while let Some(arg) = args.next() {
         // "--name value" or "--name=value"
         let mut option = |name: &str| -> Option<String> {
@@ -226,15 +223,15 @@ fn parse_args() -> Args {
             }));
         } else if arg == "--no-oam-corruption" {
             no_oam_corruption = true;
-         } else {
-             rom = Some(arg);
-         }
+        } else {
+            rom = Some(arg);
+        }
     }
     Args {
         rom: rom.unwrap_or_else(|| "Alter_Ego.nes".to_string()),
         region,
         console,
-        no_oam_corruption
+        no_oam_corruption,
     }
 }
 

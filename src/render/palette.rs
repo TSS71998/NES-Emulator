@@ -47,7 +47,7 @@ fn build_palette(hue_phase: f64) -> [(u8, u8, u8); 512] {
 
 /// The color the 2C02's composite signal decodes to, as RGB from 0 to 1,
 /// following https://www.nesdev.org/wiki/NTSC_video. Each color is a square
-/// wave between two voltages over the 12 phases of the colur subcarrier,
+/// wave between two voltages over the 12 phases of the color subcarrier,
 /// high for the 6 phases matching its hue. Each emphasis bit attenuates the
 /// signal during the 6 phases centred opposite its color, which pulls the
 /// picture towards that color, and all three together darken it evenly.
@@ -157,7 +157,7 @@ mod tests {
         assert!(b + 30 < r && b + 30 < g, "{:?}", (r, g, b));
     }
 
-        /// Hue angle of an RGB color, in degrees.
+    /// Hue angle of an RGB color, in degrees.
     fn hue((r, g, b): (u8, u8, u8)) -> f64 {
         let (r, g, b) = (r as f64, g as f64, b as f64);
         let u = b - (0.299 * r + 0.587 * g + 0.114 * b);

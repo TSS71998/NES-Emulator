@@ -78,12 +78,10 @@ pub fn from_rom(rom: Rom) -> Result<SharedMapper, String> {
         3 => Ok(Rc::new(RefCell::new(Cnrom::new(rom)))),
         4 => Ok(Rc::new(RefCell::new(Mmc3::new(rom)))),
         7 => Ok(Rc::new(RefCell::new(Axrom::new(rom)))),
-        n => {
-            return Err(format!(
-                "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3, 7 AxROM)",
-                n
-            ));
-        }
+        n => Err(format!(
+            "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3, 7 AxROM)",
+            n
+        )),
     }
 }
 

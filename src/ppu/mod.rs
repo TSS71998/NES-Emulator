@@ -46,18 +46,6 @@ pub struct NesPPU {
     write_latch: bool,
 
     internal_data_buf: u8,
-    region: Region,
-    palette: &'static [(u8, u8, u8); 512],
-    vblank_line: u16,
-    prerender_line: u16,
-    lines_per_frame: u16,
-    skips_odd_dot: bool,
-    nametable_base: [u16; 4],
-    mapper_watches_bus: bool,
-    odd_frame: bool,
-
-    last_data_read: Option<u64>,
-
     /// The PPU's 14-bit address bus. Its low 8 lines double as the data bus,
     /// so after a read they hold the byte read.
     addr_bus: u16,
@@ -86,6 +74,22 @@ pub struct NesPPU {
     /// Whether to emulate that corruption (on by default; see
     /// `set_oam_row_corruption`).
     oam_row_corruption: bool,
+    region: Region,
+    palette: &'static [(u8, u8, u8); 512],
+    /// What PPUMASK does to each pixel, worked out when it's written (see
+    /// `update_pixel_style`): the emphasis bits' offset into `palette`, and
+    /// the mask greyscale applies to the colour (0x30, or 0x3F for none).
+    emphasis_offset: usize,
+    greyscale_mask: u8,
+    vblank_line: u16,
+    prerender_line: u16,
+    lines_per_frame: u16,
+    skips_odd_dot: bool,
+    nametable_base: [u16; 4],
+    mapper_watches_bus: bool,
+    odd_frame: bool,
+
+    last_data_read: Option<u64>,
 
     pub scanline: u16,
     pub dot: u16,
@@ -95,7 +99,8 @@ pub struct NesPPU {
     /// stops it being set (and the NMI) for that frame.
     suppress_vblank: bool,
     rendering: bool,
-
+    /// `rendering` as it was a dot ago: what the fetches and sprite
+    /// evaluation go by.
     fetching: bool,
 
     in_reset: bool,
@@ -154,10 +159,6 @@ impl NesPPU {
             fine_x: 0,
             write_latch: false,
             internal_data_buf: 0,
-            region,
-            palette: Self::palette_for(region),
-            odd_frame: false,
-            last_data_read: None,
             addr_bus: 0,
             octal_latch: 0,
             data_read_at: None,
@@ -168,6 +169,12 @@ impl NesPPU {
             sprite_flags: [0; 3],
             oam_corruption: None,
             oam_row_corruption: true,
+            region,
+            palette: Self::palette_for(region),
+            emphasis_offset: 0,
+            greyscale_mask: 0x3F,
+            odd_frame: false,
+            last_data_read: None,
             scanline: 0,
             dot: 0,
             ppu_cycle: 0,
@@ -211,10 +218,6 @@ impl NesPPU {
         self.mapper.borrow().ppu_read(addr)
     }
 
-    pub fn mirroring(&self) -> Mirroring {
-        self.mapper.borrow().mirroring()
-    }
-
     /// The VRAM address register (loopy v), as used by $2007.
     pub fn vram_addr(&self) -> u16 {
         self.v & 0x3FFF
@@ -239,16 +242,17 @@ impl NesPPU {
     pub fn set_region(&mut self, region: Region) {
         self.region = region;
         self.palette = Self::palette_for(region);
+        self.update_pixel_style();
         self.vblank_line = region.vblank_scanline();
         self.prerender_line = region.prerender_scanline();
         self.lines_per_frame = region.scanlines_per_frame();
         self.skips_odd_dot = region.skips_odd_frame_dot();
     }
 
-    pub fn region(&self) -> Region {
-        self.region
-    }
-
+    /// Turns OAM row corruption (turning rendering off mid-line corrupts a
+    /// row of OAM) on or off. It's what the hardware does, but blargg's
+    /// sprite_overflow_tests/5.Emulator turns rendering off at a dot that
+    /// corrupts the sprites it counts, and Mesen leaves it off by default.
     pub fn set_oam_row_corruption(&mut self, on: bool) {
         self.oam_row_corruption = on;
         if !on {
@@ -256,10 +260,18 @@ impl NesPPU {
         }
     }
 
+    /// Works out `emphasis_offset` and `greyscale_mask` from PPUMASK and the
+    /// region; called whenever either changes.
+    fn update_pixel_style(&mut self) {
+        let swap_red_green = matches!(self.region, Region::Pal | Region::Dendy);
+        self.emphasis_offset = self.mask.emphasise(swap_red_green) << 6;
+        self.greyscale_mask = if self.mask.is_greyscale() { 0x30 } else { 0x3F };
+    }
+
     fn palette_for(region: Region) -> &'static [(u8, u8, u8); 512] {
         match region {
             Region::Ntsc => &NTSC_PALETTE,
-            Region::Pal | Region::Dendy => &PAL_PALETTE
+            Region::Pal | Region::Dendy => &PAL_PALETTE,
         }
     }
 
@@ -342,6 +354,7 @@ impl NesPPU {
             self.idle_bus();
         }
         if self.data_read {
+            // the read is done: v moves on
             self.data_read_at = None;
             self.increment_vram_addr();
         }
@@ -356,6 +369,7 @@ impl NesPPU {
                 self.status.reset_vblank_status();
                 self.status.set_sprite_zero_hit(false);
                 self.status.set_sprite_overflow(false);
+                // the clear shows at once
                 self.sprite_flags = [0; 3];
             }
             self.suppress_vblank = false;
@@ -393,23 +407,13 @@ impl NesPPU {
         new_frame
     }
 
-    fn update_nmi_line(&mut self) {
-        self.nmi_line = self.status.is_in_vblank() && self.ctrl.generate_vblank_nmi();
-    }
-
-    pub fn nmi_line(&self) -> bool {
-        self.nmi_line
-    }
-
-    pub fn is_odd_frame(&self) -> bool {
-        self.odd_frame
-    }
-
+    /// A dot without rendering on the bus: the $2007 state machine's ALE
+    /// puts v on the address bus, and its read fills the read buffer.
     fn idle_bus(&mut self) {
         if self.data_ale {
             self.addr_bus = self.v & 0x3FFF;
             self.octal_latch = self.addr_bus as u8;
-        } 
+        }
         if self.data_read {
             let addr = (self.addr_bus & 0x3F00) | self.octal_latch as u16;
             let data = self.memory_read(addr);
@@ -418,6 +422,8 @@ impl NesPPU {
         }
     }
 
+    /// Reads PPU memory: CHR below $2000, nametables above (including under
+    /// palette RAM, which is inside the PPU and never on the bus).
     pub(super) fn memory_read(&self, addr: u16) -> u8 {
         let addr = addr & 0x3FFF;
         if addr < 0x2000 {
@@ -427,8 +433,21 @@ impl NesPPU {
         }
     }
 
+    /// The sprite 0 hit and overflow bits as a $2002 read sees them at the
+    /// end of the CPU cycle (Bus samples them then): both pass through a
+    /// latch on the way, so a hit shows 2 dots after the pixel that caused it
+    /// and an overflow 1 dot after evaluation finds it (AccuracyCoin "$2002
+    /// Flag Timing").
     pub fn late_sprite_flags(&self) -> u8 {
         (self.sprite_flags[2] & 0x40) | (self.sprite_flags[1] & 0x20)
+    }
+
+    fn update_nmi_line(&mut self) {
+        self.nmi_line = self.status.is_in_vblank() && self.ctrl.generate_vblank_nmi();
+    }
+
+    pub fn nmi_line(&self) -> bool {
+        self.nmi_line
     }
 
     /// A CPU read of PPU register `reg` ($2000 + reg). Bits the register
@@ -455,6 +474,8 @@ impl NesPPU {
                 self.last_data_read = Some(self.ppu_cycle);
                 let palette = self.vram_addr() >= 0x3F00;
                 let value = self.read_data();
+                // the read ends at the end of the CPU cycle; the state machine
+                // sets up the address 2 dots after that and reads 2 later
                 self.data_read_at = Some(self.ppu_cycle + DATA_READ_ALE_DOTS);
                 if palette {
                     let value = (value & 0x3F) | (self.io_latch() & 0xC0);
@@ -515,6 +536,7 @@ impl NesPPU {
     pub fn reset(&mut self) {
         self.ctrl.update(0);
         self.mask.update(0);
+        self.update_pixel_style();
         self.write_latch = false;
         self.fine_x = 0;
         self.internal_data_buf = 0;
@@ -577,6 +599,10 @@ impl PPU for NesPPU {
             // t: .CDEFGH ........ <- d: ..CDEFGH, and bit 14 is cleared
             self.t = (self.t & 0x00FF) | ((value as u16 & 0x3F) << 8);
         } else {
+            // v takes the new address a few dots later (see step_dot), so a
+            // rendering fetch in between can read from a "hybrid" address:
+            // the new high byte with the old low byte (AccuracyCoin "Hybrid
+            // Addresses")
             self.t = (self.t & 0x7F00) | value as u16;
             self.pending_v = Some((self.ppu_cycle + PPU_ADDR_DELAY_DOTS, self.t));
         }
@@ -592,6 +618,7 @@ impl PPU for NesPPU {
 
     fn write_to_mask(&mut self, value: u8) {
         self.mask.update(value);
+        self.update_pixel_style();
     }
 
     fn write_to_oam_addr(&mut self, value: u8) {

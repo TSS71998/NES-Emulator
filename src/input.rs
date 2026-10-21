@@ -40,7 +40,7 @@ fn pad_button(button: Button) -> Option<JoypadButton> {
         Button::A | Button::X => JoypadButton::BUTTON_B,
         Button::Start => JoypadButton::START,
         Button::Back => JoypadButton::SELECT,
-        _ => return None
+        _ => return None,
     })
 }
 
@@ -48,14 +48,14 @@ struct Pad {
     controller: GameController,
     player: usize,
     buttons: JoypadButton,
-    stick: JoypadButton
+    stick: JoypadButton,
 }
 
 pub struct Input {
     subsystem: Option<GameControllerSubsystem>,
     pads: Vec<Pad>,
     keyboard: [JoypadButton; 2],
-    microphone: bool
+    microphone: bool,
 }
 
 impl Input {
@@ -64,7 +64,7 @@ impl Input {
             subsystem,
             pads: Vec::new(),
             keyboard: [JoypadButton::empty(); 2],
-            microphone: false
+            microphone: false,
         }
     }
 
@@ -157,7 +157,7 @@ impl Input {
                     stick: JoypadButton::empty(),
                 });
             }
-            Err(e) => eprintln!("warning: couldn't open gamepad {}: {}", joystick_index, e)
+            Err(e) => eprintln!("warning: couldn't open gamepad {}: {}", joystick_index, e),
         }
     }
 
@@ -177,7 +177,7 @@ impl Input {
 fn without_opposites(mut buttons: JoypadButton) -> JoypadButton {
     for pair in [
         JoypadButton::LEFT | JoypadButton::RIGHT,
-        JoypadButton::UP | JoypadButton::DOWN
+        JoypadButton::UP | JoypadButton::DOWN,
     ] {
         if buttons.contains(pair) {
             buttons.remove(pair);
