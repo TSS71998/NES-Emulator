@@ -119,6 +119,24 @@ Pass the ROM to play as an argument. A bare file name is looked up in the curren
 
 `--release` gives the fastest build (about 4 ms per frame, a quarter of the 16.7 ms a frame lasts). A plain `cargo run` also keeps up: `Cargo.toml` builds the dev profile at `opt-level = 1`, which is still debuggable but runs at about 5 ms per frame instead of 30 ms. Without it, the emulator falls behind real time and the audio crackles.
 
+## Launcher
+
+`launcher/` is a game library window in the style of DuckStation's game list. It finds your games and runs the one you pick in the emulator. It's a separate program, so the emulator works the same with or without it.
+
+```sh
+cargo build --release                    # the emulator, which the launcher runs
+cd launcher
+cargo run --release
+```
+
+- **Library.** Add folders (subfolders are included) or single `.nes` files, with the toolbar buttons or by dropping them onto the window. No-Intro style names are tidied up: `Legend of Zelda, The (USA) (Rev 1).nes` is listed as *The Legend of Zelda*, with `USA` and `Rev 1` as tags.
+- **Game list.** Shows region, mapper, size, last played and total time played. Click a column header to sort, type in the search box (`Ctrl+F`) to filter, and use the arrow keys and `Enter` to pick and play.
+- **Details panel.** Shows what the ROM header says and the region and console the emulator will pick. Games using a mapper the emulator doesn't support yet are marked and can't be started.
+- **Per-game settings.** Region, console and OAM row corruption, passed to the emulator as `--region`, `--console` and `--no-oam-corruption`.
+- **Play.** Double-click a game, press `Enter` or click Play. The status bar shows the running game with a timer and a Stop button. If the emulator fails to start a game, its error is shown.
+
+The launcher finds the emulator next to itself or in this repository's `target/release` (then `target/debug`). Otherwise, choose it in Settings. Its settings and play times are saved in the platform's app data folder (`%APPDATA%\NES Launcher\data` on Windows, `~/.local/share/neslauncher` on Linux, `~/Library/Application Support/NES-Launcher` on macOS).
+
  ## Controls 
 | NES button | Player 1 keys | Player 2 keys | Gamepad |
 |------------|---------------|---------------|---------|
@@ -162,6 +180,7 @@ The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, spri
 | `src/joypad.rs` | Controller |
 | `src/region.rs` | NTSC, PAL and Dendy clocks and timing tables, and the console models |
 | `src/trace.rs` | CPU trace output in `nestest` log format |
+| `launcher/` | The game library window (a separate program; see [Launcher](#launcher)) |
 
 ## Acknowledgements and references
 
