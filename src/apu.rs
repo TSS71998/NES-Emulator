@@ -1,4 +1,5 @@
 use crate::region::{FrameSequencerTiming, Region};
+use crate::state::{StateReader, StateWriter};
 
 const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
@@ -1002,6 +1003,251 @@ impl APU {
 
     pub fn take_samples(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.samples)
+    }
+}
+
+impl LengthCounter {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.bool(self.enabled);
+        w.u8(self.counter);
+        w.bool(self.halt);
+        w.bool(self.new_halt);
+        w.u8(self.reload);
+        w.u8(self.previous);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.enabled = r.bool();
+        self.counter = r.u8();
+        self.halt = r.bool();
+        self.new_halt = r.bool();
+        self.reload = r.u8();
+        self.previous = r.u8();
+    }
+}
+
+impl Envelope {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.bool(self.start);
+        w.bool(self.loop_flag);
+        w.bool(self.constant);
+        w.u8(self.volume);
+        w.u8(self.divider);
+        w.u8(self.decay);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.start = r.bool();
+        self.loop_flag = r.bool();
+        self.constant = r.bool();
+        self.volume = r.u8();
+        self.divider = r.u8();
+        self.decay = r.u8();
+    }
+}
+
+impl Pulse {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.length.save_state(w);
+        w.u8(self.duty);
+        w.u8(self.duty_pos);
+        w.u16(self.timer_period);
+        w.u16(self.timer);
+        self.envelope.save_state(w);
+        w.bool(self.sweep_enabled);
+        w.u8(self.sweep_period);
+        w.bool(self.sweep_negate);
+        w.u8(self.sweep_shift);
+        w.u8(self.sweep_divider);
+        w.bool(self.sweep_reload);
+        w.bool(self.muted);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.length.load_state(r);
+        self.duty = r.u8();
+        self.duty_pos = r.u8();
+        self.timer_period = r.u16();
+        self.timer = r.u16();
+        self.envelope.load_state(r);
+        self.sweep_enabled = r.bool();
+        self.sweep_period = r.u8();
+        self.sweep_negate = r.bool();
+        self.sweep_shift = r.u8();
+        self.sweep_divider = r.u8();
+        self.sweep_reload = r.bool();
+        self.muted = r.bool();
+    }
+}
+
+impl Triangle {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.length.save_state(w);
+        w.bool(self.control);
+        w.u8(self.linear_reload_value);
+        w.u8(self.linear_counter);
+        w.bool(self.linear_reload);
+        w.u16(self.timer_period);
+        w.u16(self.timer);
+        w.u8(self.seq_pos);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.length.load_state(r);
+        self.control = r.bool();
+        self.linear_reload_value = r.u8();
+        self.linear_counter = r.u8();
+        self.linear_reload = r.bool();
+        self.timer_period = r.u16();
+        self.timer = r.u16();
+        self.seq_pos = r.u8();
+    }
+}
+
+impl Noise {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.length.save_state(w);
+        self.envelope.save_state(w);
+        w.bool(self.mode);
+        w.u16(self.timer_period);
+        w.u16(self.timer);
+        w.u16(self.shift);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.length.load_state(r);
+        self.envelope.load_state(r);
+        self.mode = r.bool();
+        self.timer_period = r.u16();
+        self.timer = r.u16();
+        self.shift = r.u16();
+    }
+}
+
+impl Dmc {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.bool(self.irq_enabled);
+        w.bool(self.loop_flag);
+        w.u16(self.rate);
+        w.u16(self.timer);
+        w.u8(self.output_level);
+        w.u16(self.sample_addr);
+        w.u16(self.sample_len);
+        w.u16(self.current_addr);
+        w.u16(self.bytes_remaining);
+        w.option_u8(self.sample_buffer);
+        w.u8(self.shift_reg);
+        w.u8(self.bits_remaining);
+        w.bool(self.silence);
+        w.bool(self.irq_flag);
+        w.u8(self.start_delay);
+        w.u8(self.disable_delay);
+        w.bool(self.stop_dma);
+        w.bool(self.reloaded);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.irq_enabled = r.bool();
+        self.loop_flag = r.bool();
+        self.rate = r.u16();
+        self.timer = r.u16();
+        self.output_level = r.u8();
+        self.sample_addr = r.u16();
+        self.sample_len = r.u16();
+        self.current_addr = r.u16();
+        self.bytes_remaining = r.u16();
+        self.sample_buffer = r.option_u8();
+        self.shift_reg = r.u8();
+        self.bits_remaining = r.u8();
+        self.silence = r.bool();
+        self.irq_flag = r.bool();
+        self.start_delay = r.u8();
+        self.disable_delay = r.u8();
+        self.stop_dma = r.bool();
+        self.reloaded = r.bool();
+    }
+}
+
+impl FrameCounter {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.usize(self.mode);
+        w.usize(self.step);
+        w.u32(self.cycle);
+        w.bool(self.irq_inhibit);
+        w.bool(self.irq_flag);
+        w.option_u8(self.pending_write);
+        w.u8(self.write_delay);
+        w.u8(self.clear_delay);
+        w.u8(self.block_clocks);
+        w.u8(self.last_write);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.mode = r.usize() & 1;
+        self.step = r.usize().min(5);
+        self.cycle = r.u32();
+        self.irq_inhibit = r.bool();
+        self.irq_flag = r.bool();
+        self.pending_write = r.option_u8();
+        self.write_delay = r.u8();
+        self.clear_delay = r.u8();
+        self.block_clocks = r.u8();
+        self.last_write = r.u8();
+    }
+}
+
+impl APU {
+    pub fn save_state(&self, w: &mut StateWriter) {
+        self.pulse1.save_state(w);
+        self.pulse2.save_state(w);
+        self.triangle.save_state(w);
+        self.noise.save_state(w);
+        self.dmc.save_state(w);
+        self.frame_counter.save_state(w);
+        w.bool(self.length_writes_pending);
+        w.bool(self.odd_cycle);
+        w.f64(self.sample_phase);
+        w.f32(self.sample_sum);
+        w.u32(self.sample_count);
+        w.f64(self.rate_adjust);
+        for filter in [&self.high_pass_90, &self.high_pass_440] {
+            w.f32(filter.prev_in);
+            w.f32(filter.prev_out);
+        }
+        w.f32(self.low_pass_14k.prev_out);
+        w.u32(self.samples.len() as u32);
+        for &sample in &self.samples {
+            w.f32(sample);
+        }
+        w.f32(self.mix_cache);
+        w.bool(self.mix_dirty);
+    }
+
+    pub fn load_state(&mut self, r: &mut StateReader) {
+        self.pulse1.load_state(r);
+        self.pulse2.load_state(r);
+        self.triangle.load_state(r);
+        self.noise.load_state(r);
+        self.dmc.load_state(r);
+        self.frame_counter.load_state(r);
+        self.length_writes_pending = r.bool();
+        self.odd_cycle = r.bool();
+        self.sample_phase = r.f64();
+        self.sample_sum = r.f32();
+        self.sample_count = r.u32();
+        self.rate_adjust = r.f64();
+        for filter in [&mut self.high_pass_90, &mut self.high_pass_440] {
+            filter.prev_in = r.f32();
+            filter.prev_out = r.f32();
+        }
+        self.low_pass_14k.prev_out = r.f32();
+        let count = (r.u32() as usize).min(48_000);
+        self.samples.clear();
+        for _ in 0..count {
+            self.samples.push(r.f32());
+        }
+        self.mix_cache = r.f32();
+        self.mix_dirty = r.bool();
     }
 }
 

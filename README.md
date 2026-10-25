@@ -173,7 +173,8 @@ The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, spri
 | File | Purpose |
 |------|---------|
 | `src/main.rs` | SDL window, command-line options and the main loop |
-| `src/lib.rs`, `src/nes.rs` | The emulator as a library. `Nes` loads a game and runs it one frame at a time, for frontends like the launcher |
+| `src/lib.rs`, `src/nes.rs` | The emulator as a library. `Nes` loads a game, runs it one frame at a time, and saves and loads states, for frontends like the launcher |
+| `src/state.rs` | The save state format: each part of the console writes its state in a fixed order and reads it back (`save_state`/`load_state`) |
 | `src/input.rs` | Keyboard and gamepad input for both controllers |
 | `src/cpu.rs`, `src/opcodes.rs` | 6502 CPU and opcode table |
 | `src/bus.rs` | Memory map; runs the PPU and APU around every CPU memory access, samples interrupts and handles DMA stalls |

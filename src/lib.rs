@@ -18,4 +18,5 @@ pub mod opcodes;
 pub mod ppu;
 pub mod region;
 pub mod render;
+pub mod state;
 pub mod trace;

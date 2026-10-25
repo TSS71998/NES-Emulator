@@ -1,5 +1,6 @@
 use super::Mapper;
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 const PRG_RAM_SIZE: usize = 0x2000;
 const CHR_RAM_SIZE: usize = 0x2000;
@@ -39,6 +40,20 @@ impl Nrom {
 }
 
 impl Mapper for Nrom {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.prg_ram);
+        if self.chr_is_ram {
+            w.bytes(&self.chr);
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.prg_ram);
+        if self.chr_is_ram {
+            r.bytes_into(&mut self.chr);
+        }
+    }
+    
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x6000..=0x7FFF => Some(self.prg_ram[(addr - 0x6000) as usize]),

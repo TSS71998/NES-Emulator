@@ -1,5 +1,6 @@
 use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 const PRG_BANK: usize = 0x4000;
 
@@ -25,6 +26,16 @@ impl Uxrom {
 }
 
 impl Mapper for Uxrom {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.chr.save_state(w);
+        w.usize(self.bank);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.chr.load_state(r);
+        self.bank = r.usize();
+    }
+
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         let len = self.prg_rom.len();
         let offset = addr as usize & (PRG_BANK - 1);

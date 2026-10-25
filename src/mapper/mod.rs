@@ -13,6 +13,7 @@ pub use nrom::Nrom;
 pub use uxrom::Uxrom;
 
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -66,6 +67,10 @@ pub trait Mapper {
 
     /// Restores battery-backed PRG-RAM from a .sav file.
     fn load_battery_ram(&mut self, _data: &[u8]) {}
+
+    fn save_state(&self, w: &mut StateWriter);
+
+    fn load_state(&mut self, r: &mut StateReader);
 }
 
 pub type SharedMapper = Rc<RefCell<dyn Mapper>>;
@@ -133,6 +138,18 @@ impl Chr {
 
     fn len(&self) -> usize {
         self.data.len()
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        if self.is_ram {
+            w.bytes(&self.data);
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        if self.is_ram {
+            r.bytes_into(&mut self.data);
+        }
     }
 }
 
@@ -216,6 +233,10 @@ pub(crate) mod test_util {
     }
 
     impl super::Mapper for ScanlineCounter {
+        fn save_state(&self, _w: &mut crate::state::StateWriter) {}
+
+        fn load_state(&mut self, _r: &mut crate::state::StateReader) {}
+        
         fn cpu_read(&self, addr: u16) -> Option<u8> {
             (addr >= 0x8000).then(|| self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()])
         }

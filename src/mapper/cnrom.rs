@@ -1,5 +1,6 @@
 use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 const CHR_BANK: usize = 0x2000;
 
@@ -28,6 +29,16 @@ impl Cnrom {
 }
 
 impl Mapper for Cnrom {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.chr.save_state(w);
+        w.usize(self.chr_bank);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.chr.load_state(r);
+        self.chr_bank = r.usize();
+    }
+    
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x8000..=0xFFFF => Some(self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()]),

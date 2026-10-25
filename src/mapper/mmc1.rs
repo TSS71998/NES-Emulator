@@ -1,5 +1,6 @@
 use super::{Chr, Mapper, bank_offset, prg_ram_size};
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 /// Mapper 1: Nintendo MMC1 (SxROM boards).
 ///
@@ -121,6 +122,30 @@ impl Mmc1 {
 }
 
 impl Mapper for Mmc1 {
+        fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.prg_ram);
+        self.chr.save_state(w);
+        w.u8(self.shift);
+        w.u8(self.shift_count);
+        w.u8(self.control);
+        w.u8(self.chr_bank0);
+        w.u8(self.chr_bank1);
+        w.u8(self.prg_bank);
+        w.option_u64(self.last_write_cycle.map(|c| c as u64));
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.prg_ram);
+        self.chr.load_state(r);
+        self.shift = r.u8();
+        self.shift_count = r.u8();
+        self.control = r.u8();
+        self.chr_bank0 = r.u8();
+        self.chr_bank1 = r.u8();
+        self.prg_bank = r.u8();
+        self.last_write_cycle = r.option_u64().map(|c| c as usize);
+    }
+    
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x6000..=0x7FFF if self.prg_ram_enabled() => {

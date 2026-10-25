@@ -1,3 +1,5 @@
+use crate::state::{StateReader, StateWriter};
+
 bitflags! {
     /// The buttons, in the order the controller reports them (A first).
     pub struct JoypadButton: u8 {
@@ -66,6 +68,22 @@ impl Joypad {
 
     pub fn set_buttons(&mut self, buttons: JoypadButton) {
         self.button_status = buttons;
+    }
+}
+
+impl Joypad {
+    pub fn save_state(&self, w: &mut StateWriter) {
+        w.bool(self.strobe);
+        w.u8(self.button_index);
+        w.u8(self.button_status.bits());
+        w.bool(self.microphone);
+    }
+
+    pub fn load_state(&mut self, r: &mut StateReader) {
+        self.strobe = r.bool();
+        self.button_index = r.u8();
+        self.button_status = JoypadButton::from_bits_truncate(r.u8());
+        self.microphone = r.bool();
     }
 }
 

@@ -16,6 +16,8 @@
 
 use super::{NesPPU, palette_index};
 use crate::region::Region;
+use crate::state::{StateReader, StateWriter};
+
 #[derive(Default)]
 pub(super) struct Background {
     next_tile: u8,
@@ -696,6 +698,81 @@ impl NesPPU {
         self.frame.data[i] = rgb.0;
         self.frame.data[i + 1] = rgb.1;
         self.frame.data[i + 2] = rgb.2;
+    }
+}
+
+/// Save states (see `state.rs`).
+impl Background {
+    pub(super) fn save_state(&self, w: &mut StateWriter) {
+        w.u8(self.next_tile);
+        w.u8(self.next_palette);
+        w.u8(self.next_low);
+        w.u8(self.next_high);
+        w.u16(self.pattern_low);
+        w.u16(self.pattern_high);
+        w.u16(self.attribute_low);
+        w.u16(self.attribute_high);
+        w.u8(self.attribute_latch);
+        w.bool(self.load_pending);
+    }
+
+    pub(super) fn load_state(&mut self, r: &mut StateReader) {
+        self.next_tile = r.u8();
+        self.next_palette = r.u8();
+        self.next_low = r.u8();
+        self.next_high = r.u8();
+        self.pattern_low = r.u16();
+        self.pattern_high = r.u16();
+        self.attribute_low = r.u16();
+        self.attribute_high = r.u16();
+        self.attribute_latch = r.u8();
+        self.load_pending = r.bool();
+    }
+}
+
+impl Sprites {
+    pub(super) fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.secondary);
+        w.bool(self.sprite_zero_found);
+        w.bool(self.sprite_zero_loaded);
+        w.u8(self.buffer);
+        w.u8(self.secondary_addr);
+        w.bool(self.secondary_full);
+        w.bool(self.secondary_reset);
+        w.u8(self.fetch_y);
+        w.u8(self.fetch_tile);
+        w.bool(self.copying);
+        w.bool(self.done);
+        w.u8(self.overflow_reads);
+        for unit in &self.units {
+            w.u8(unit.low);
+            w.u8(unit.high);
+            w.u8(unit.attr);
+            w.u8(unit.counter);
+        }
+        w.u8(self.drawing);
+    }
+
+    pub(super) fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.secondary);
+        self.sprite_zero_found = r.bool();
+        self.sprite_zero_loaded = r.bool();
+        self.buffer = r.u8();
+        self.secondary_addr = r.u8() & 0x1F;
+        self.secondary_full = r.bool();
+        self.secondary_reset = r.bool();
+        self.fetch_y = r.u8();
+        self.fetch_tile = r.u8();
+        self.copying = r.bool();
+        self.done = r.bool();
+        self.overflow_reads = r.u8();
+        for unit in &mut self.units {
+            unit.low = r.u8();
+            unit.high = r.u8();
+            unit.attr = r.u8();
+            unit.counter = r.u8();
+        }
+        self.drawing = r.u8();
     }
 }
 

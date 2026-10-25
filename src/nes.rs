@@ -14,8 +14,12 @@ use crate::joypad::Joypad;
 use crate::mapper::{self, SharedMapper};
 use crate::ppu::NesPPU;
 use crate::region::{Console, Region};
+use crate::state::{StateReader, StateWriter};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+const STATE_MAGIC: &[u8; 8] = b"NESSTATE";
+const STATE_VERSION: u16 = 1;
 
 pub const FRAME_WIDTH: usize = 256;
 pub const FRAME_HEIGHT: usize = 240;
@@ -56,12 +60,14 @@ pub struct Nes {
     region_source: &'static str,
     console: Console,
     console_source: &'static str,
-    frames: u64
+    frames: u64,
+    rom_checksum: u64
 }
 
 impl Nes {
     pub fn new(rom_file: &[u8], file_name: &str, options: Options) -> Result<Nes, String> {
         let rom = Rom::new(rom_file)?;
+        let rom_checksum = checksum(rom_file);
         let (region, region_source) = match options.region {
             Some(region) => (region, "chosen"),
             None => Region::detect(&rom, file_name)
@@ -109,7 +115,8 @@ impl Nes {
             region_source,
             console,
             console_source,
-            frames: 0
+            frames: 0,
+            rom_checksum
         })
     }
 
@@ -170,8 +177,93 @@ impl Nes {
     pub fn frames(&self) -> u64 {
         self.frames
     }
+
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut w = StateWriter::new();
+        for &b in STATE_MAGIC {
+            w.u8(b);
+        }
+        w.u16(STATE_VERSION);
+        w.u64(self.rom_checksum);
+        w.u8(region_code(self.region));
+        w.u8(console_code(self.console));
+        w.u64(self.frames);
+        w.bytes(&self.picture);
+        self.cpu.save_state(&mut w);
+        w.into_bytes()
+    }
+
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let backup = self.save_state();
+        let result = self.read_state(data);
+        if result.is_err() {
+            // put back what a damaged state may have half overwritten
+            let _ = self.read_state(&backup);
+        }
+        result
+    }
+
+    fn read_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut r = StateReader::new(data);
+        let mut magic = [0; 8];
+        for b in &mut magic {
+            *b = r.u8();
+        }
+        if &magic != STATE_MAGIC {
+            return Err("this isn't a save state".into());
+        }
+        if r.u16() != STATE_VERSION {
+            return Err("this save state is from a different version of the emulator".into());
+        }
+        if r.u64() != self.rom_checksum {
+            return Err("this save state is for a different game".into());
+        }
+        if r.u8() != region_code(self.region) {
+            return Err(format!(
+                "this save state wasn't made in {} mode, as the game is running now",
+                self.region.name()
+            ));
+        }
+        if r.u8() != console_code(self.console) {
+            return Err(format!(
+                "this save state wasn't made on the {}, as the game is running now",
+                self.console.name()
+            ));
+        }
+        let frames = r.u64();
+        let mut picture = vec![0; FRAME_BYTES];
+        r.bytes_into(&mut picture);
+        self.cpu.load_state(&mut r);
+        r.finish()?;
+        self.frames = frames;
+        self.state.picture.borrow_mut().copy_from_slice(&picture);
+        self.picture = picture;
+        Ok(())
+    }
 }
 
+/// FNV-1a: a quick fingerprint of the ROM file.
+fn checksum(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+        (hash ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn region_code(region: Region) -> u8 {
+    match region {
+        Region::Ntsc => 0,
+        Region::Pal => 1,
+        Region::Dendy => 2,
+    }
+}
+
+fn console_code(console: Console) -> u8 {
+    match console {
+        Console::Nes => 0,
+        Console::TopLoader => 1,
+        Console::Famicom => 2,
+    }
+}
 #[cfg(test)]
 mod test {
     use super::*;
@@ -247,5 +339,55 @@ mod test {
             (Region::Dendy, "chosen")
         );
         assert_eq!(nes.console(), Console::Famicom);
+    }
+
+        #[test]
+    fn test_save_state_carries_on_exactly() {
+        let mut a = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        for _ in 0..3 {
+            a.run_frame();
+        }
+        let state = a.save_state();
+        let mut b = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        b.load_state(&state).unwrap();
+        assert_eq!(b.frames(), 3);
+        assert_eq!(b.save_state(), state, "saving again gives the same bytes");
+        for _ in 0..3 {
+            a.run_frame();
+            b.run_frame();
+        }
+        assert_eq!(a.save_state(), b.save_state());
+    }
+
+    #[test]
+    fn test_states_only_load_into_their_game_and_region() {
+        let mut nes = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        nes.run_frame();
+        let state = nes.save_state();
+
+        let mut other_rom = test_rom();
+        other_rom[0x100] ^= 0xFF;
+        let mut other = Nes::new(&other_rom, "test.nes", Options::default()).unwrap();
+        assert!(other.load_state(&state).unwrap_err().contains("different game"));
+
+        let options = Options {
+            region: Some(Region::Pal),
+            ..Options::default()
+        };
+        let mut pal = Nes::new(&test_rom(), "test.nes", options).unwrap();
+        assert!(pal.load_state(&state).unwrap_err().contains("PAL"));
+
+        assert!(nes.load_state(b"hello").unwrap_err().contains("isn't a save state"));
+    }
+
+    #[test]
+    fn test_damaged_state_leaves_the_console_as_it_was() {
+        let mut nes = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        nes.run_frame();
+        let before = nes.save_state();
+        let mut damaged = before.clone();
+        damaged.truncate(damaged.len() - 100);
+        assert!(nes.load_state(&damaged).is_err());
+        assert_eq!(nes.save_state(), before);
     }
 }

@@ -4,6 +4,7 @@ use crate::joypad::Joypad;
 use crate::mapper::SharedMapper;
 use crate::ppu::NesPPU;
 use crate::region::{Console, Region};
+use crate::state::{StateReader, StateWriter};
 
 //  _______________ $10000  _______________
 // | PRG-ROM       |       |               |
@@ -626,6 +627,69 @@ impl Mem for Bus<'_> {
                 self.ppu.refresh_mirroring();
             }
         }
+    }
+}
+
+impl Bus<'_> {
+    pub fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.cpu_vram);
+        w.bool(self.need_halt);
+        w.bool(self.need_dummy_read);
+        w.bool(self.dmc_dma_running);
+        w.option_u8(self.oam_dma_page);
+        w.bool(self.dma_joypad_held);
+        w.u8(self.open_bus);
+        w.bool(self.abort_dmc_dma);
+        w.u8(self.internal_bus);
+        w.option_u8(self.pending_strobe);
+        w.bool(self.last_read_halted);
+        w.usize(self.cycles);
+        w.u64(self.master_clock);
+        w.u64(self.ppu_clock);
+        w.u8(self.instruction_cycles);
+        w.bool(self.nmi_line);
+        w.bool(self.need_nmi);
+        w.bool(self.prev_need_nmi);
+        w.bool(self.run_irq);
+        w.bool(self.prev_run_irq);
+        w.bool(self.irq_mask);
+        for joypad in &self.joypads {
+            joypad.save_state(w);
+        }
+        self.mapper.borrow().save_state(w);
+        self.ppu.save_state(w);
+        self.apu.save_state(w);
+    }
+
+    pub fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.cpu_vram);
+        self.need_halt = r.bool();
+        self.need_dummy_read = r.bool();
+        self.dmc_dma_running = r.bool();
+        self.oam_dma_page = r.option_u8();
+        self.dma_joypad_held = r.bool();
+        self.open_bus = r.u8();
+        self.abort_dmc_dma = r.bool();
+        self.internal_bus = r.u8();
+        self.pending_strobe = r.option_u8();
+        self.last_read_halted = r.bool();
+        self.cycles = r.usize();
+        self.master_clock = r.u64();
+        self.ppu_clock = r.u64();
+        self.instruction_cycles = r.u8();
+        self.nmi_line = r.bool();
+        self.need_nmi = r.bool();
+        self.prev_need_nmi = r.bool();
+        self.run_irq = r.bool();
+        self.prev_run_irq = r.bool();
+        self.irq_mask = r.bool();
+        for joypad in &mut self.joypads {
+            joypad.load_state(r);
+        }
+        self.mapper.borrow_mut().load_state(r);
+        self.ppu.load_state(r);
+        self.ppu.refresh_mirroring();
+        self.apu.load_state(r);
     }
 }
 

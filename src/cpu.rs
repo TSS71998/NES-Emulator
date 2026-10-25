@@ -1,5 +1,6 @@
 use crate::bus::Bus;
 use crate::opcodes;
+use crate::state::{StateReader, StateWriter};
 
 bitflags! {
     /// # Status Register (P) https://www.nesdev.org/wiki/Status_flags
@@ -1072,6 +1073,32 @@ impl<'a> CPU<'a> {
         if program_counter_state == self.program_counter {
             self.program_counter = self.program_counter.wrapping_add((opcode.len - 1) as u16);
         }
+    }
+}
+
+impl CPU<'_> {
+    pub fn save_state(&self, w: &mut StateWriter) {
+        w.u8(self.register_a);
+        w.u8(self.register_x);
+        w.u8(self.register_y);
+        w.u8(self.status.bits());
+        w.u16(self.program_counter);
+        w.u8(self.stack_pointer);
+        w.u8(self.cycles);
+        w.bool(self.reset_pending);
+        self.bus.save_state(w);
+    }
+
+    pub fn load_state(&mut self, r: &mut StateReader) {
+        self.register_a = r.u8();
+        self.register_x = r.u8();
+        self.register_y = r.u8();
+        self.status = CpuFlags::from_bits_truncate(r.u8());
+        self.program_counter = r.u16();
+        self.stack_pointer = r.u8();
+        self.cycles = r.u8();
+        self.reset_pending = r.bool();
+        self.bus.load_state(r);
     }
 }
 

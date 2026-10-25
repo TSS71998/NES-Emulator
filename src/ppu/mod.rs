@@ -13,6 +13,7 @@ use crate::mapper::SharedMapper;
 use crate::region::Region;
 use crate::render::frame::Frame;
 use crate::render::palette::{NTSC_PALETTE, PAL_PALETTE};
+use crate::state::{StateReader, StateWriter};
 use registers::control::ControlRegister;
 use registers::mask::MaskRegister;
 use registers::status::StatusRegister;
@@ -713,6 +714,100 @@ impl PPU for NesPPU {
             return self.sprites.buffer;
         }
         self.oam_data[self.oam_addr as usize]
+    }
+}
+
+impl NesPPU {
+    pub fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.palette_table);
+        w.bytes(&self.vram);
+        w.u8(self.ctrl.bits());
+        w.u8(self.mask.bits());
+        w.u8(self.status.bits());
+        w.bytes(&self.oam_data);
+        w.u8(self.oam_addr);
+        w.u16(self.v);
+        w.u16(self.t);
+        w.u8(self.fine_x);
+        w.bool(self.write_latch);
+        w.u8(self.internal_data_buf);
+        w.u16(self.addr_bus);
+        w.u8(self.octal_latch);
+        w.option_u64(self.data_read_at);
+        w.bool(self.data_ale);
+        w.bool(self.data_read);
+        w.bool(self.bus_used);
+        w.bool(self.pending_v.is_some());
+        let (at, v) = self.pending_v.unwrap_or((0, 0));
+        w.u64(at);
+        w.u16(v);
+        for flags in self.sprite_flags {
+            w.u8(flags);
+        }
+        w.option_u8(self.oam_corruption);
+        w.bool(self.odd_frame);
+        w.option_u64(self.last_data_read);
+        w.u16(self.scanline);
+        w.u16(self.dot);
+        w.u64(self.ppu_cycle);
+        w.bool(self.suppress_vblank);
+        w.bool(self.rendering);
+        w.bool(self.fetching);
+        w.bool(self.in_reset);
+        w.bool(self.nmi_line);
+        w.u8(self.io_latch);
+        for refreshed in self.io_latch_refreshed {
+            w.u64(refreshed);
+        }
+        self.bg.save_state(w);
+        self.sprites.save_state(w);
+        w.bytes(&self.frame.data);
+    }
+
+    pub fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.palette_table);
+        r.bytes_into(&mut self.vram);
+        self.ctrl = ControlRegister::from_bits_truncate(r.u8());
+        self.mask = MaskRegister::from_bits_truncate(r.u8());
+        self.status = StatusRegister::from_bits_truncate(r.u8());
+        r.bytes_into(&mut self.oam_data);
+        self.oam_addr = r.u8();
+        self.v = r.u16();
+        self.t = r.u16();
+        self.fine_x = r.u8() & 7;
+        self.write_latch = r.bool();
+        self.internal_data_buf = r.u8();
+        self.addr_bus = r.u16();
+        self.octal_latch = r.u8();
+        self.data_read_at = r.option_u64();
+        self.data_ale = r.bool();
+        self.data_read = r.bool();
+        self.bus_used = r.bool();
+        let pending = r.bool();
+        let (at, v) = (r.u64(), r.u16());
+        self.pending_v = pending.then_some((at, v));
+        for flags in &mut self.sprite_flags {
+            *flags = r.u8();
+        }
+        self.oam_corruption = r.option_u8().map(|row| row & 0x1F);
+        self.odd_frame = r.bool();
+        self.last_data_read = r.option_u64();
+        self.scanline = r.u16();
+        self.dot = r.u16();
+        self.ppu_cycle = r.u64();
+        self.suppress_vblank = r.bool();
+        self.rendering = r.bool();
+        self.fetching = r.bool();
+        self.in_reset = r.bool();
+        self.nmi_line = r.bool();
+        self.io_latch = r.u8();
+        for refreshed in &mut self.io_latch_refreshed {
+            *refreshed = r.u64();
+        }
+        self.bg.load_state(r);
+        self.sprites.load_state(r);
+        r.bytes_into(&mut self.frame.data);
+        self.update_pixel_style();
     }
 }
 

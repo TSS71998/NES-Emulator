@@ -1,5 +1,6 @@
 use super::{Chr, Mapper, bank_offset};
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 const PRG_BANK: usize = 0x8000;
 
@@ -25,6 +26,18 @@ impl Axrom {
 }
 
 impl Mapper for Axrom {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.chr.save_state(w);
+        w.usize(self.bank);
+        w.bool(self.upper_screen);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        self.chr.load_state(r);
+        self.bank = r.usize();
+        self.upper_screen = r.bool();
+    }
+    
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x8000..=0xFFFF => {

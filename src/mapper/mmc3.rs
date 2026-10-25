@@ -1,5 +1,6 @@
 use super::{Chr, Mapper, bank_offset, prg_ram_size};
 use crate::cartridge::{Mirroring, Rom};
+use crate::state::{StateReader, StateWriter};
 
 const PRG_BANK: usize = 0x2000;
 const CHR_BANK: usize = 0x0400;
@@ -148,6 +149,38 @@ impl Mmc3 {
 }
 
 impl Mapper for Mmc3 {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.bytes(&self.prg_ram);
+        self.chr.save_state(w);
+        w.u8(self.bank_select);
+        w.bytes(&self.registers);
+        w.mirroring(self.mirroring);
+        w.bool(self.prg_ram_enabled);
+        w.bool(self.prg_ram_write_protected);
+        w.u8(self.irq_latch);
+        w.u8(self.irq_counter);
+        w.bool(self.irq_reload);
+        w.bool(self.irq_enabled);
+        w.bool(self.irq_pending);
+        w.option_u64(self.a12_low_since);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) {
+        r.bytes_into(&mut self.prg_ram);
+        self.chr.load_state(r);
+        self.bank_select = r.u8();
+        r.bytes_into(&mut self.registers);
+        self.mirroring = r.mirroring();
+        self.prg_ram_enabled = r.bool();
+        self.prg_ram_write_protected = r.bool();
+        self.irq_latch = r.u8();
+        self.irq_counter = r.u8();
+        self.irq_reload = r.bool();
+        self.irq_enabled = r.bool();
+        self.irq_pending = r.bool();
+        self.a12_low_since = r.option_u64();
+    }
+    
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x6000..=0x7FFF if self.prg_ram_enabled => {
