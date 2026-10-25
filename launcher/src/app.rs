@@ -9,10 +9,16 @@ use crate::machine::{self, Machine, Report, StartGame};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextWrapMode};
 use egui_extras::{Column, TableBuilder};
 use sdl2::keyboard::Keycode;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 const ROW_HEIGHT: f32 = 24.0;
+
+const SLOTS: usize = 4;
+
+const NOTICE_TIME: Duration = Duration::from_secs(3);
+
+const SLOT_PICTURE: egui::Vec2 = egui::vec2(132.0, 132.2);
 
 const OVERSCAN: usize = 8;
 const VISIBLE_WIDTH: usize = 256 - 2 * OVERSCAN;
@@ -28,11 +34,21 @@ struct Playing {
     hint_until: Instant,
     warning: Option<String>,
     paused: bool,
-    focus_menu: bool
+    focus_menu: bool,
+    slot: usize,
+    notice: Option<(String, bool, Instant)>,
+    slots: Vec<Slot>
+}
+
+struct Slot {
+    saved: Option<SystemTime>,
+    picture: Option<egui::TextureHandle>
 }
 
 enum MenuChoice {
     Resume,
+    SaveState(usize),
+    LoadState(usize),
     Reset,
     Fullscreen,
     Quit
@@ -181,7 +197,10 @@ impl App {
             hint_until: Instant::now() + HINT_TIME,
             warning: None,
             paused: false,
-            focus_menu: false
+            focus_menu: false,
+            slot: 0,
+            notice: None,
+            slots: Vec::new()
         });
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} - NES Launcher",
@@ -229,7 +248,71 @@ impl App {
                 self.message = Some((format!("Couldn't start the game: {error}"), true));
                 self.failed_run = Some((key, error));
             }
+            Report::StateSaved { slot, result } => self.state_finished(slot, result, "Saved to"),
+            Report::StateLoaded { slot, result } => self.state_finished(slot, result, "Loaded"),
         }
+    }
+
+    fn save_state(&mut self, slot: usize) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        playing.slot = slot;
+        match state_path(Path::new(&playing.key), slot) {
+            Some(path) => self.machine.save_state(slot, path),
+            None => self.notice("There's no folder to keep save states in", true)
+        } 
+    }
+
+    fn load_state(&mut self, slot: usize) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        playing.slot = slot;
+        match state_path(Path::new(&playing.key), slot) {
+            Some(path) if path.is_file() => self.machine.load_state(slot, path), 
+            _ => self.notice(&format!("Slot {} is empty", slot + 1), true)
+        }
+    }
+
+    fn state_finished(&mut self, slot: usize, result: Result<(), String>, done: &str) {
+        match result {
+            Ok(()) => self.notice(&format!("{done} slot {}", slot + 1), false),
+            Err(e) => self.notice(&format!("Slot {}: {e}", slot + 1), true),
+        }
+    }
+
+    fn notice(&mut self, text: &str, error: bool) {
+        if let Some(playing) = self.playing.as_mut() {
+            playing.notice = Some((text.to_string(), error, Instant::now() + NOTICE_TIME));
+            self.ctx.request_repaint();
+        }
+    }
+
+    fn read_slots(&mut self) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        playing.slots = (0..SLOTS)
+            .map(|slot| {
+                let path = state_path(Path::new(&playing.key), slot);
+                let saved = path
+                    .as_ref()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.modified().ok());
+                let picture = path
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|state| {
+                        let picture = nes_emulator::nes::Nes::state_picture(&state)?;
+                        Some(self.ctx.load_texture(
+                            format!("slot{slot}"),
+                            visible_picture(picture),
+                            egui::TextureOptions::LINEAR,
+                        ))
+                    });
+                Slot { saved, picture }
+            })
+            .collect();
     }
 
     fn record_session(&mut self, key: &str, played: Duration) {
@@ -290,6 +373,15 @@ impl App {
                 self.machine.reset();
                 continue;
             }
+            if pressed && (key == Key::F5 || key == Key::F8) {
+                let slot = self.playing.as_ref().map_or(0, |p| p.slot);
+                if key == Key::F5 {
+                    self.save_state(slot);
+                } else {
+                    self.load_state(slot);
+                }
+                continue;
+            }
             
             if let Some(key) = machine::emulator_key(physical_key.unwrap_or(key)) {
                 self.set_key(key, pressed);
@@ -317,6 +409,9 @@ impl App {
         playing.focus_menu = paused;
         self.machine.pause(paused);
         self.release_keys();
+        if paused {
+            self.read_slots();
+        }
         self.ctx.request_repaint();
     }
 
@@ -384,20 +479,38 @@ impl App {
 
         ctx.set_cursor_icon(egui::CursorIcon::None);
         let now = Instant::now();
+        let mut lines = Vec::new();
         if now < playing.hint_until {
-            let mut hint = format!(
-                "{}   ·   Esc: menu   ·   F11: fullscreen   ·   Ctrl+R: reset",
-                playing.title
-            );
             if let Some(warning) = &playing.warning {
-                hint = format!("{warning}\n{hint}");
+                lines.push(RichText::new(warning));
             }
+            lines.push(RichText::new(format!(
+                "{}   ·   Esc: menu   ·   F5/F8: save/load state   ·   F11: fullscreen",
+                playing.title
+            )));
+            ctx.request_repaint_after(playing.hint_until - now);
+        }
+        if let Some((text, error, until)) = &playing.notice {
+            if now < *until {
+                let text = RichText::new(text).strong();
+                lines.push(if *error {
+                    text.color(ctx.style().visuals.error_fg_color)
+                } else {
+                    text
+                });
+                ctx.request_repaint_after(*until - now);
+            }
+        }
+        if !lines.is_empty() {
             egui::Area::new(egui::Id::new("game_hint"))
                 .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
                 .show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(hint));
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        for line in lines {
+                            ui.label(line);
+                        }
+                    });
                 });
-            ctx.request_repaint_after(playing.hint_until - now);
         }
     }
 
@@ -409,13 +522,19 @@ impl App {
             .send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
     }
 
-    fn pause_menu(&mut self, ctx: &egui::Context) {
+        fn pause_menu(&mut self, ctx: &egui::Context) {
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
         let title = playing.title.clone();
         let focus = std::mem::take(&mut playing.focus_menu);
         let fullscreen = self.fullscreen;
+        let current_slot = playing.slot;
+        let slots: Vec<(Option<SystemTime>, Option<egui::TextureId>)> = playing
+            .slots
+            .iter()
+            .map(|s| (s.saved, s.picture.as_ref().map(|p| p.id())))
+            .collect();
 
         let dim = egui::LayerId::new(egui::Order::Middle, egui::Id::new("pause_dim"));
         ctx.layer_painter(dim)
@@ -427,46 +546,66 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
                 egui::Frame::window(ui.style()).inner_margin(16).show(ui, |ui| {
-                    ui.set_width(280.0);
-                    ui.vertical_centered(|ui| {
-                        ui.heading(&title);
-                        ui.weak("Paused");
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(280.0);
+                            ui.vertical_centered(|ui| {
+                                ui.heading(&title);
+                                ui.weak("Paused");
+                            });
+                            ui.add_space(10.0);
+                            let button = |ui: &mut egui::Ui, text: &str, keys: &str| {
+                                ui.add(
+                                    egui::Button::new(text)
+                                        .shortcut_text(keys)
+                                        .min_size(egui::vec2(ui.available_width(), 30.0)),
+                                )
+                            };
+                            let resume = button(ui, "▶  Resume", "Esc");
+                            if focus {
+                                resume.request_focus();
+                            }
+                            if resume.clicked() {
+                                choice = Some(MenuChoice::Resume);
+                            }
+                            if button(ui, "Reset", "Ctrl+R").clicked() {
+                                choice = Some(MenuChoice::Reset);
+                            }
+                            let fullscreen_text = if fullscreen { "Leave fullscreen" } else { "Fullscreen" };
+                            if button(ui, fullscreen_text, "F11").clicked() {
+                                choice = Some(MenuChoice::Fullscreen);
+                            }
+                            ui.add_space(6.0);
+                            ui.separator();
+                            self.video_settings(ui);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            if button(ui, "Quit to library", "").clicked() {
+                                choice = Some(MenuChoice::Quit);
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            if let Some(pick) = state_slots(ui, &slots, current_slot) {
+                                choice = Some(pick);
+                            }
+                        });
                     });
-                    ui.add_space(10.0);
-                    let button = |ui: &mut egui::Ui, text: &str, keys: &str| {
-                        ui.add(
-                            egui::Button::new(text)
-                                .shortcut_text(keys)
-                                .min_size(egui::vec2(ui.available_width(), 30.0)),
-                        )
-                    };
-                    let resume = button(ui, "▶  Resume", "Esc");
-                    if focus {
-                        resume.request_focus();
-                    }
-                    if resume.clicked() {
-                        choice = Some(MenuChoice::Resume);
-                    }
-                    if button(ui, "Reset", "Ctrl+R").clicked() {
-                        choice = Some(MenuChoice::Reset);
-                    }
-                    let fullscreen_text = if fullscreen { "Leave fullscreen" } else { "Fullscreen" };
-                    if button(ui, fullscreen_text, "F11").clicked() {
-                        choice = Some(MenuChoice::Fullscreen);
-                    }
-                    ui.add_space(6.0);
-                    ui.separator();
-                    self.video_settings(ui);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    if button(ui, "Quit to library", "").clicked() {
-                        choice = Some(MenuChoice::Quit);
-                    }
                 });
             });
 
         match choice {
             Some(MenuChoice::Resume) => self.pause_game(false),
+            Some(MenuChoice::SaveState(slot)) => {
+                self.save_state(slot);
+                self.pause_game(false);
+            }
+            Some(MenuChoice::LoadState(slot)) => {
+                self.load_state(slot);
+                self.pause_game(false);
+            }
             Some(MenuChoice::Reset) => {
                 self.machine.reset();
                 self.pause_game(false);
@@ -1187,6 +1326,87 @@ impl eframe::App for App {
     }
 }
 
+fn state_slots(
+    ui: &mut egui::Ui,
+    slots: &[(Option<SystemTime>, Option<egui::TextureId>)],
+    current: usize,
+) -> Option<MenuChoice> {
+    let mut choice = None;
+    ui.strong("Save states");
+    ui.weak("F5 saves and F8 loads the outlined slot.");
+    ui.add_space(4.0);
+    let now = format::unix_now();
+    egui::Grid::new("state_slots")
+        .num_columns(2)
+        .spacing([10.0, 10.0])
+        .show(ui, |ui| {
+            for (slot, (saved, picture)) in slots.iter().enumerate() {
+                ui.vertical(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(SLOT_PICTURE, egui::Sense::hover());
+                    let painter = ui.painter();
+                    match picture {
+                        Some(id) => {
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            painter.image(*id, rect, uv, Color32::WHITE);
+                        }
+                        None => {
+                            painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+                            painter.text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Empty",
+                                egui::FontId::proportional(13.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
+                    }
+                    if slot == current {
+                        painter.rect_stroke(
+                            rect,
+                            2.0,
+                            ui.visuals().selection.stroke,
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    let when = saved
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map_or("empty".to_string(), |t| format::ago(now, Some(t.as_secs())));
+                    ui.small(format!("Slot {}  ·  {when}", slot + 1));
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Save").clicked() {
+                            choice = Some(MenuChoice::SaveState(slot));
+                        }
+                        let load = ui.add_enabled(saved.is_some(), egui::Button::new("Load").small());
+                        if load.clicked() {
+                            choice = Some(MenuChoice::LoadState(slot));
+                        }
+                    });
+                });
+                if slot % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+    choice
+}
+
+fn state_path(game: &Path, slot: usize) -> Option<PathBuf> {
+    let data = eframe::storage_dir("NES Launcher")?;
+    let name: String = game
+        .file_stem()?
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || " -_().".contains(c) { c } else { '_' })
+        .take(60)
+        .collect();
+    let id = game
+        .to_string_lossy()
+        .bytes()
+        .fold(0x811c_9dc5_u32, |hash, b| (hash ^ b as u32).wrapping_mul(0x0100_0193));
+    let folder = data.join("states").join(format!("{name}-{id:08x}"));
+    Some(folder.join(format!("slot{}.state", slot + 1)))
+}
+
 fn visible_picture(picture: &[u8]) -> egui::ColorImage {
     let mut pixels = Vec::with_capacity(VISIBLE_WIDTH * VISIBLE_HEIGHT * 3);
     for row in picture.chunks_exact(256 * 3).skip(OVERSCAN).take(VISIBLE_HEIGHT) {
@@ -1238,5 +1458,18 @@ mod test {
         let tv = game_size(egui::vec2(1100.0, 700.0), ScreenSize::WholePixels, true);
         assert_eq!(tv.y, 672.0);
         assert!((tv.x - 720.0 * 8.0 / 7.0).abs() < 0.01, "{tv:?}");
+    }
+
+     #[test]
+    fn test_state_paths_are_per_game_and_slot() {
+        let a = state_path(Path::new("/roms/Game (USA).nes"), 0);
+        let b = state_path(Path::new("/other/Game (USA).nes"), 0);
+        let a2 = state_path(Path::new("/roms/Game (USA).nes"), 1);
+        if let (Some(a), Some(b), Some(a2)) = (a, b, a2) {
+            assert_ne!(a.parent(), b.parent(), "same name, different ROM");
+            assert_eq!(a.parent(), a2.parent());
+            assert!(a.ends_with("slot1.state") && a2.ends_with("slot2.state"));
+            assert!(a.parent().unwrap().file_name().unwrap().to_string_lossy().starts_with("Game (USA)-"));
+        }
     }
 }

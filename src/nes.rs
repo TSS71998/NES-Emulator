@@ -103,6 +103,7 @@ impl Nes {
         bus.set_region(region);
         bus.set_console(console);
         bus.set_oam_row_corruption(options.oam_row_corruption);
+        bus.set_audio_callback(44_100, |_| 1.0);
 
         let mut cpu = CPU::new(bus);
         cpu.reset();
@@ -176,6 +177,15 @@ impl Nes {
 
     pub fn frames(&self) -> u64 {
         self.frames
+    }
+
+    pub fn state_picture(state: &[u8]) -> Option<&[u8]> {
+        let start = STATE_MAGIC.len() + 2 + 8 + 1 + 1 + 8 + 4;
+        let version = state.get(8..10)?;
+        if !state.starts_with(STATE_MAGIC) || version != STATE_VERSION.to_le_bytes() {
+            return None;
+        }
+        state.get(start..start + FRAME_BYTES)
     }
 
     pub fn save_state(&self) -> Vec<u8> {
@@ -389,5 +399,25 @@ mod test {
         damaged.truncate(damaged.len() - 100);
         assert!(nes.load_state(&damaged).is_err());
         assert_eq!(nes.save_state(), before);
+    }
+
+        #[test]
+    fn test_state_picture_is_the_last_frame() {
+        let mut nes = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        nes.run_frame();
+        let state = nes.save_state();
+        assert_eq!(Nes::state_picture(&state), Some(nes.picture()));
+        assert_eq!(Nes::state_picture(b"not a state"), None);
+    }
+
+    #[test]
+    fn test_sound_without_an_output_doesnt_pile_up() {
+        let mut nes = Nes::new(&test_rom(), "test.nes", Options::default()).unwrap();
+        nes.run_frame();
+        let size = nes.save_state().len();
+        for _ in 0..120 {
+            nes.run_frame();
+        }
+        assert_eq!(nes.save_state().len(), size);
     }
 }

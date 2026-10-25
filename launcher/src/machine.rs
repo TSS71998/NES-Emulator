@@ -17,7 +17,7 @@ use nes_emulator::region::{Console, Region};
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,9 @@ enum Command {
     Start(Box<StartGame>),
     Stop,
     Reset,
-    Pause(bool)
+    Pause(bool),
+    SaveState { slot: usize, path: PathBuf },
+    LoadState { slot: usize, path: PathBuf }
 }
 
 pub enum Report {
@@ -52,6 +54,14 @@ pub enum Report {
     Failed {
         key: String,
         error: String
+    },
+    StateSaved {
+        slot: usize,
+        result: Result<(), String>
+    },
+    StateLoaded {
+        slot: usize,
+        result: Result<(), String>
     }
 }
 
@@ -110,6 +120,14 @@ impl Machine {
 
     pub fn pause(&self, paused: bool) {
         let _ = self.commands.send(Command::Pause(paused));
+    }
+
+    pub fn save_state(&self, slot: usize, path: PathBuf) {
+        let _ = self.commands.send(Command::SaveState { slot, path });
+    }
+
+    pub fn load_state(&self, slot: usize, path: PathBuf) {
+        let _ = self.commands.send(Command::LoadState { slot, path });
     }
 
     pub fn key(&self, key: Keycode, down: bool) {
@@ -217,17 +235,25 @@ impl MachineThread {
                             paused_for += since.elapsed();
                         }
                     }
+                    Ok(Command::SaveState { slot, path }) => {
+                        let result = write_state(&path, &nes.save_state());
+                        let _ = self.reports.send(Report::StateSaved { slot, result });
+                    }
+                    Ok(Command::LoadState { slot, path }) => {
+                        let result = std::fs::read(&path)
+                            .map_err(|e| format!("can't read the save state: {e}"))
+                            .and_then(|data| nes.load_state(&data));
+                        if result.is_ok() {
+                            self.show(nes.picture());
+                        }
+                        let _ = self.reports.send(Report::StateLoaded { slot, result });
+                    }
                     Ok(Command::Start(_)) => {},
                     Err(TryRecvError::Empty) => break,
                 }
             }
             let picture = nes.run_frame();
-            {
-                let mut screen = self.screen.lock().unwrap();
-                screen.picture.copy_from_slice(picture);
-                screen.frame += 1;
-            }
-            self.ctx.request_repaint();
+            self.show(picture);
 
             frames_since_save += 1;
             if frames_since_save >= SAVE_INTERVAL_FRAMES {
@@ -244,6 +270,15 @@ impl MachineThread {
             key,
             played: started.elapsed().saturating_sub(paused_for)
         });
+    }
+
+    fn show(&self, picture: &[u8]) {
+        {
+            let mut screen = self.screen.lock().unwrap();
+            screen.picture.copy_from_slice(picture);
+            screen.frame += 1;
+        }
+        self.ctx.request_repaint();
     }
 
     fn load(&self, game: &StartGame) -> Result<Nes, String> {
@@ -344,6 +379,16 @@ fn save_battery(nes: &Nes, path: &std::path::Path, saved: &mut Option<Vec<u8>>) 
         Ok(()) => *saved = Some(ram),
         Err(e) => eprintln!("warning: couldn't write {}: {e}", path.display())
     }
+}
+
+fn write_state(path: &Path, state: &[u8]) -> Result<(), String> {
+    let error = |e: std::io::Error| format!("can't write the save state: {e}");
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder).map_err(error)?;
+    }
+    let new = path.with_extension("new");
+    std::fs::write(&new, state).map_err(error)?;
+    std::fs::rename(&new, path).map_err(error)
 }
 
 pub fn emulator_key(key: egui::Key) -> Option<Keycode> {
