@@ -1,27 +1,13 @@
-pub mod apu;
-pub mod audio;
-pub mod bus;
-pub mod cartridge;
-pub mod cpu;
-pub mod frame_limiter;
-pub mod input;
-pub mod joypad;
-pub mod mapper;
-pub mod opcodes;
-pub mod ppu;
-pub mod region;
-pub mod render;
-pub mod trace;
-
-use audio::AudioOutput;
-use bus::Bus;
-use cartridge::Rom;
-use cpu::CPU;
-use frame_limiter::FrameLimiter;
-use input::Input;
-use mapper::SharedMapper;
-use ppu::NesPPU;
-use region::{Console, Region};
+use nes_emulator::audio::AudioOutput;
+use nes_emulator::bus::Bus;
+use nes_emulator::cartridge::Rom;
+use nes_emulator::cpu::CPU;
+use nes_emulator::frame_limiter::FrameLimiter;
+use nes_emulator::input::Input;
+use nes_emulator::joypad;
+use nes_emulator::mapper::{self, SharedMapper};
+use nes_emulator::ppu::NesPPU;
+use nes_emulator::region::{Console, Region};
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
@@ -30,8 +16,7 @@ use sdl2::rect::Rect;
 use std::cell::Cell;
 use std::rc::Rc;
 
-#[macro_use]
-extern crate bitflags;
+
 
 const OVERSCAN_LINES: u32 = 8;
 const OVERSCAN_COLUMNS: u32 = 8;

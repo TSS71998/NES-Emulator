@@ -121,21 +121,23 @@ Pass the ROM to play as an argument. A bare file name is looked up in the curren
 
 ## Launcher
 
-`launcher/` is a game library window in the style of DuckStation's game list. It finds your games and runs the one you pick in the emulator. It's a separate program, so the emulator works the same with or without it.
+`launcher/` is a game library window in the style of DuckStation's game list. It finds your games and plays the one you pick in its own window, using the emulator as a library (`src/nes.rs`). The standalone emulator works the same with or without it.
 
 ```sh
-cargo build --release                    # the emulator, which the launcher runs
-cd launcher
-cargo run --release
+cargo run -p nes_launcher --release      # from the project folder
 ```
 
 - **Library.** Add folders (subfolders are included) or single `.nes` files, with the toolbar buttons or by dropping them onto the window. No-Intro style names are tidied up: `Legend of Zelda, The (USA) (Rev 1).nes` is listed as *The Legend of Zelda*, with `USA` and `Rev 1` as tags.
 - **Game list.** Shows region, mapper, size, last played and total time played. Click a column header to sort, type in the search box (`Ctrl+F`) to filter, and use the arrow keys and `Enter` to pick and play.
 - **Details panel.** Shows what the ROM header says and the region and console the emulator will pick. Games using a mapper the emulator doesn't support yet are marked and can't be started.
-- **Per-game settings.** Region, console and OAM row corruption, passed to the emulator as `--region`, `--console` and `--no-oam-corruption`.
-- **Play.** Double-click a game, press `Enter` or click Play. The status bar shows the running game with a timer and a Stop button. If the emulator fails to start a game, its error is shown.
+- **Per-game settings.** Region, console and OAM row corruption: the same choices as the emulator's `--region`, `--console` and `--no-oam-corruption`.
+- **Play.** Double-click a game, press `Enter` or click Play, and the game fills the window (at the biggest whole multiple of its size that fits). The keys and gamepads are the same as the standalone emulator's (see [Controls](#controls)). `Esc` goes back to the library and `Ctrl+R` resets. Battery saves go in the `.sav` file next to the ROM, and closing the window during a game saves it and its play time first.
 
-The launcher finds the emulator next to itself or in this repository's `target/release` (then `target/debug`). Otherwise, choose it in Settings. Its settings and play times are saved in the platform's app data folder (`%APPDATA%\NES Launcher\data` on Windows, `~/.local/share/neslauncher` on Linux, `~/Library/Application Support/NES-Launcher` on macOS).
+The emulator runs on its own thread, at the console's frame rate, and SDL plays the sound and reads the gamepads, so the launcher needs the SDL2 libraries too. The launcher can't tell the left and right `Shift` and `Ctrl` keys apart, so either one works as player 2's Start and Select.
+
+On Linux, including WSL, the **Add folder…** and **Add games…** dialogs come from the desktop's portal service or, failing that, `zenity`. WSL has neither until you install zenity (`sudo apt install zenity`). You can also type or paste a folder's path in the box below **Add folder…** (on the empty library screen, or in Settings). Under WSL, Windows paths like `C:\Users\you\ROMs` are turned into `/mnt/c/Users/you/ROMs`.
+
+The launcher's settings and play times are saved in the platform's app data folder (…)
 
  ## Controls 
 | NES button | Player 1 keys | Player 2 keys | Gamepad |
@@ -167,6 +169,7 @@ The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, spri
 | File | Purpose |
 |------|---------|
 | `src/main.rs` | SDL window, command-line options and the main loop |
+| `src/lib.rs`, `src/nes.rs` | The emulator as a library. `Nes` loads a game and runs it one frame at a time, for frontends like the launcher |
 | `src/input.rs` | Keyboard and gamepad input for both controllers |
 | `src/cpu.rs`, `src/opcodes.rs` | 6502 CPU and opcode table |
 | `src/bus.rs` | Memory map; runs the PPU and APU around every CPU memory access, samples interrupts and handles DMA stalls |
@@ -180,7 +183,7 @@ The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, spri
 | `src/joypad.rs` | Controller |
 | `src/region.rs` | NTSC, PAL and Dendy clocks and timing tables, and the console models |
 | `src/trace.rs` | CPU trace output in `nestest` log format |
-| `launcher/` | The game library window (a separate program; see [Launcher](#launcher)) |
+| `launcher/` | The game library window, which also plays the games (see [Launcher](#launcher)) |
 
 ## Acknowledgements and references
 

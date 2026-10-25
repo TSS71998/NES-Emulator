@@ -1392,7 +1392,9 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui_extras",
+ "nes_emulator",
  "rfd",
+ "sdl2",
  "serde",
 ]
 
