@@ -11,7 +11,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub folders: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
-    pub emulator: Option<PathBuf>,
     pub games: BTreeMap<String, GameRecord>,
     pub sort: SortKey,
     pub descending: bool

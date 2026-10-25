@@ -1,16 +1,32 @@
 //! The launcher window: a toolbar, the game list, a details panel for the
-//! selected game, and a status bar.
+//! selected game, and a status bar; or, while a game runs, the game.
 
 use crate::config::{Config, GameRecord, SortKey};
 use crate::format;
-use crate::launch::{self, Running};
 use crate::library::{self, Console, Game, Region};
+use crate::machine::{self, Machine, Report, StartGame};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextWrapMode};
 use egui_extras::{Column, TableBuilder};
+use sdl2::keyboard::Keycode;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ROW_HEIGHT: f32 = 24.0;
+
+const OVERSCAN: usize = 8;
+const VISIBLE_WIDTH: usize = 256 - 2 * OVERSCAN;
+const VISIBLE_HEIGHT: usize = 240 - 2 * OVERSCAN;
+
+const HINT_TIME: Duration = Duration::from_secs(4);
+
+struct Playing {
+    key: String,
+    title: String,
+    texture: Option<egui::TextureHandle>,
+    shown_frame: u64,
+    hint_until: Instant,
+    warning: Option<String>
+}
 
 pub struct App {
     config: Config,
@@ -20,11 +36,14 @@ pub struct App {
     search: String,
     focus_search: bool,
     scroll_to_selected: bool,
-    running: Option<Running>,
+    machine: Machine,
+    playing: Option<Playing>,
+    held_keys: Vec<Keycode>,
+    ctx: egui::Context,
     failed_run: Option<(String, String)>,
     message: Option<(String, bool)>,
     settings_open: bool,
-    emulator: Option<PathBuf>
+    folder_input: String
 }
 
 impl App {
@@ -37,7 +56,6 @@ impl App {
         cc.egui_ctx
             .style_mut(|style| style.interaction.selectable_labels = false);
         let mut app = App {
-            emulator: launch::find_emulator(config.emulator.as_deref()),
             config,
             games: Vec::new(),
             shown: Vec::new(),
@@ -45,10 +63,14 @@ impl App {
             search: String::new(),
             focus_search: false,
             scroll_to_selected: false,
-            running: None,
+            machine: Machine::start(cc.egui_ctx.clone()),
+            playing: None,
+            held_keys: Vec::new(),
+            ctx: cc.egui_ctx.clone(),
             failed_run: None,
             message: None,
-            settings_open: false
+            settings_open: false,
+            folder_input: String::new()
         };
         app.rescan();
         app
@@ -119,78 +141,273 @@ impl App {
         let Some(game) = self.games.iter().find(|g| g.key() == key) else {
             return;
         };
-        if let Some(running) = &self.running {
-            self.message = Some((format!("{} is still running.", running.title), true));
+        if self.playing.is_some() {
             return;
         }
-        let Some(emulator) = self.emulator.clone() else {
-            self.message = Some(("Emulator not found: choose it in Settings.".into(), true));
-            self.settings_open = true;
-            return;
-        };
         if let Some(problem) = game.problem() {
             self.message = Some((problem, true));
             return;
         }
         let record = self.record(key);
-        let args = launch::emulator_args(&game.path, &record);
-        match Running::start(&emulator, args, game.key(), game.title.clone()) {
-            Ok(running) => {
-                self.message = Some((format!("Started {}.", game.title), false));
-                self.failed_run = None;
-                self.running = Some(running);
+        self.machine.play(StartGame {
+            key: game.key(),
+            path: game.path.clone(),
+            region: record
+                .region
+                .and_then(|r| nes_emulator::region::Region::parse(r.arg())),
+                console: record
+                    .console
+                    .and_then(|c| nes_emulator::region::Console::parse(c.arg())),
+                    oam_row_corruption: !record.no_oam_corruption
+        });
+        self.failed_run = None;
+        self.playing = Some(Playing {
+            key: game.key(),
+            title: game.title.clone(),
+            texture: None, 
+            shown_frame: self.machine.screen.lock().unwrap().frame,
+            hint_until: Instant::now() + HINT_TIME,
+            warning: None,
+        });
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{} - NES Launcher",
+            game.title
+        )));
+
+        self.ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
             }
-            Err(e) => {
-                self.message = Some((format!("Couldn't start the emulator: {e}"), true));
+        })
+    }
+
+    fn stop_game(&mut self) {
+        if self.playing.take().is_some() {
+            self.machine.stop();
+            self.release_keys();
+            self.ctx
+                .send_viewport_cmd(egui::ViewportCommand::Title("NES Launcher".into()));
+            self.ctx.request_repaint();
+        }
+    }
+
+    fn check_machine(&mut self) {
+        while let Some(report) = self.machine.poll() {
+            self.handle_report(report);
+        }
+    }
+
+    fn handle_report(&mut self, report: Report) {
+        match report {
+            Report::Started { key, warning } => {
+                if let Some(playing) = self.playing.as_mut().filter(|p| p.key == key) {
+                    if let Some(warning) = &warning {
+                        self.message = Some((warning.clone(), true));
+                    }
+                    playing.warning = warning;
+                }
+            }
+            Report::Stopped { key, played } => self.record_session(&key, played),
+            Report::Failed { key, error } => {
+                if self.playing.as_ref().is_some_and(|p| p.key == key) {
+                    self.stop_game();
+                }
+                self.message = Some((format!("Couldn't start the game: {error}"), true));
+                self.failed_run = Some((key, error));
             }
         }
     }
 
-    fn check_running(&mut self, ctx: &egui::Context) {
-        let Some(running) = &mut self.running else {
-            return;
-        };
-        let Some(finished) = running.poll() else {
-            ctx.request_repaint_after(Duration::from_millis(500));
-            return;
-        };
-        self.running = None;
-
-        let played = finished.played.as_secs();
-        if finished.status.success() || played >= 5 {
-            let mut record = self.record(&finished.key);
-            record.play_secs += played;
-            record.last_played = Some(format::unix_now().saturating_sub(played));
-            self.set_record(&finished.key, record);
-        }
+    fn record_session(&mut self, key: &str, played: Duration) {
+        let secs = played.as_secs();
+        let mut record = self.record(key);
+        record.play_secs += secs;
+        record.last_played = Some(format::unix_now().saturating_sub(secs));
+        self.set_record(key, record);
         self.refresh_list();
+        let title = self
+            .games
+            .iter()
+            .find(|g| g.key() == key)
+            .map_or_else(|| key.to_string(), |g| g.title.clone());
+        self.message = Some((
+            format!("Played {title} for {}.", format::clock(secs)),
+            false
+        ));
+    }
 
-        if finished.status.success() {
-            self.message = Some((
-                format!(
-                    "PLayed {} for {}.",
-                    finished.title,
-                    format::clock(finished.played.as_secs())
-                ),
-                false
-            ));
-        } else {
-            let reason = finished
-                .output
-                .lines()
-                .rev()
-                .find(|l| l.starts_with("error"))
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("the emulator stopped ({})", finished.status));
-            self.message = Some((format!("{}: {reason}", finished.title), true));
-            self.failed_run = Some((finished.key, finished.output));
+    fn finish_game(&mut self) {
+        if self.playing.is_none() {
+            return;
         }
+        self.stop_game();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while let Some(report) = self
+            .machine
+            .wait(deadline.saturating_duration_since(Instant::now()))
+        {
+            let done = matches!(report, Report::Stopped { .. } | Report::Failed { .. });
+            self.handle_report(report);
+            if done {
+                break;
+            }
+        }
+    }
+
+    fn game_keys(&mut self, ctx: &egui::Context) {
+        let (events, modifiers, focused) =
+            ctx.input(|i| (i.events.clone(), i.modifiers, i.focused));
+        for event in events {
+            let egui::Event::Key {
+                key,
+                physical_key,
+                pressed,
+                repeat: false,
+                modifiers
+            } = event
+            else {
+                continue;
+            };
+            if pressed && key == Key::Escape {
+                self.stop_game();
+                continue;
+            }
+            if pressed && key == Key::R && modifiers.command {
+                self.machine.reset();
+                continue;
+            }
+            
+            if let Some(key) = machine::emulator_key(physical_key.unwrap_or(key)) {
+                self.set_key(key, pressed);
+            }
+        }
+
+        self.set_key(Keycode::RShift, modifiers.shift);
+        self.set_key(Keycode::RCtrl, modifiers.ctrl);
+        if !focused {
+            self.release_keys();
+        }
+    }
+
+    fn set_key(&mut self, key: Keycode, down: bool) {
+        let held = self.held_keys.contains(&key);
+        if down && !held {
+            self.held_keys.push(key);
+            self.machine.key(key, true);
+        } else if !down && held {
+            self.held_keys.retain(|&k| k != key);
+            self.machine.key(key, false);
+        }
+    }
+
+    fn release_keys(&mut self) {
+        for key in std::mem::take(&mut self.held_keys) {
+            self.machine.key(key, false);
+        }
+    }
+
+    fn game_screen(&mut self, ctx: &egui::Context) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        {
+            let screen = self.machine.screen.lock().unwrap();
+            if screen.frame != playing.shown_frame {
+                playing.shown_frame = screen.frame;
+                let image = visible_picture(&screen.picture);
+                match &mut playing.texture {
+                    Some(texture) => texture.set(image, egui::TextureOptions::NEAREST),
+                    None => {
+                        playing.texture = 
+                            Some(ctx.load_texture("game", image, egui::TextureOptions::NEAREST))
+                    }
+                }
+            }
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(Color32::BLACK))
+            .show(ctx, |ui| {
+                let area = ui.max_rect();
+                if let Some(texture) = &playing.texture {
+                    let rect = egui::Rect::from_center_size(area.center(), game_size(area.size()));
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+                }
+            });
+        let now = Instant::now();
+        if now < playing.hint_until {
+            let mut hint = format!(
+                "{}   ·   Esc: back to the library   ·   Ctrl+R: reset",
+                playing.title
+            );
+            if let Some(warning) = &playing.warning {
+                hint = format!("{warning}\n{hint}");
+            }
+            egui::Area::new(egui::Id::new("game_hint"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 12.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(hint));
+                });
+            ctx.request_repaint_after(playing.hint_until - now);
+        }
+    }
+
+    fn choose_folder(&mut self) {
+        let started = Instant::now();
+        match rfd::FileDialog::new().pick_folder() {
+            Some(folder) => self.add_folder(folder),
+            None => self.check_dialog_opened(started),
+        }
+    }
+
+    fn check_dialog_opened(&mut self, started: Instant) {
+        if cfg!(target_os = "linux") && started.elapsed() < Duration::from_millis(500) {
+            self.message = Some((
+                "No file dialog could open. Install zenity (sudo apt install zenity), \
+                 or type the folder's path in Settings."
+                    .into(),
+                true,
+            ));
+            self.settings_open = true;
+        }
+    }
+
+    fn folder_path_input(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let path = library::path_from_input(&self.folder_input);
+            let is_folder = !self.folder_input.trim().is_empty() && path.is_dir();
+            let add_width = 60.0;
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.folder_input)
+                    .hint_text(if cfg!(target_os = "linux") {
+                        "/mnt/c/Users/you/ROMs  or  C:\\Users\\you\\ROMs"
+                    } else {
+                        "C:\\Users\\you\\ROMs"
+                    })
+                    .desired_width(ui.available_width() - add_width),
+            );
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let add = ui.add_enabled(is_folder, egui::Button::new("Add"));
+            if add.clicked() || (entered && is_folder) {
+                self.folder_input.clear();
+                self.add_folder(path);
+            } else if entered {
+                self.message = Some((format!("{} isn't a folder.", path.display()), true));
+            }
+        });
     }
 
     fn add_folder(&mut self, folder: PathBuf) {
         if !self.config.folders.contains(&folder) {
+            let before = self.games.len();
+            self.message = Some((format!("Added {}.", folder.display()), false));
             self.config.folders.push(folder);
             self.rescan();
+            if let Some((text, _)) = &mut self.message {
+                let found = self.games.len().saturating_sub(before);
+                text.push_str(&format!(" {found} new games."));
+            }
         }
     }
 
@@ -273,16 +490,16 @@ impl App {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("📁 Add folder…").clicked() {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.add_folder(folder);
-                }
+                self.choose_folder();
             }
             if ui.button("➕ Add games…").clicked() {
-                if let Some(files) = rfd::FileDialog::new()
-                    .add_filter("NES ROMs", &["nes, NES"])
+                let started = Instant::now();
+                match rfd::FileDialog::new()
+                    .add_filter("NES ROMs", &["nes", "NES"])
                     .pick_files()
                 {
-                    self.add_files(files);
+                    Some(files) => self.add_files(files),
+                    None => self.check_dialog_opened(started),
                 }
             }
             if ui
@@ -313,13 +530,6 @@ impl App {
                 if ui.button("⚙ Settings").clicked() {
                     self.settings_open = !self.settings_open;
                 }
-                if self.emulator.is_none() {
-                    let warning =
-                        RichText::new("⚠ Emulator not found").color(ui.visuals().warn_fg_color);
-                    if ui.link(warning).clicked() {
-                        self.settings_open = true;
-                    }
-                }
             })
         });
     }
@@ -332,24 +542,6 @@ impl App {
                 format!("{} of {} games", self.shown.len(), self.games.len())
             };
             ui.label(count);
-            if let Some(running) = &mut self.running {
-                ui.separator();
-                ui.label(
-                    RichText::new(format!(
-                        "▶ Playing {}  {}",
-                        running.title,
-                        format::clock(running.elapsed().as_secs())
-                    ))
-                    .strong(),
-                );
-                if ui
-                    .small_button("■ Stop")
-                    .on_hover_text("Close the emulator")
-                    .clicked()
-                {
-                    running.stop();
-                }
-            }
             if let Some((text, error)) = &self.message {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let text = RichText::new(text);
@@ -499,14 +691,15 @@ impl App {
                 ui.heading("No games yet");
                 ui.add_space(6.0);
                 ui.label(
-                    "Add a folder with your .nes folders, or drop files or folders onto this window."
+                    "Add a folder with your .nes files, or drop files or folders onto this window."
                 );
                 ui.add_space(12.0);
                 if ui.button("📁 Add folder…").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.add_folder(folder);
-                    }
+                    self.choose_folder();
                 }
+                ui.add_space(12.0);
+                ui.weak("or type or paste its path:");
+                ui.allocate_ui(egui::vec2(460.0, 24.0), |ui| self.folder_path_input(ui));
             } else {
                 ui.heading("No matches");
                 ui.label(format!(
@@ -662,20 +855,13 @@ impl App {
         record.no_oam_corruption = !corruption;
 
         ui.add_space(10.0);
-        let can_play = problem.is_none() && self.running.is_none() && self.emulator.is_some();
         let play = ui
             .add_enabled(
-                can_play,
+                problem.is_none(),
                 egui::Button::new(RichText::new("▶  Play").size(18.0))
                     .min_size(egui::vec2(ui.available_width(), 36.0)),
             )
-            .on_disabled_hover_text(if self.running.is_some() {
-                "A game is already running"
-            } else if self.emulator.is_none() {
-                "Emulator not found: choose it in Settings"
-            } else {
-                "This game can't run in the emulator"
-            });
+            .on_disabled_hover_text("This game can't run in the emulator");
         ui.add_space(4.0);
         ui.weak(format!(
             "Last played: {}   ·   Time played: {}",
@@ -687,7 +873,7 @@ impl App {
             if failed_key == &key {
                 ui.add_space(8.0);
                 egui::CollapsingHeader::new(
-                    RichText::new("Last run failed").color(ui.visuals().error_fg_color),
+                    RichText::new("Couldn't start").color(ui.visuals().error_fg_color),
                 )
                 .default_open(true)
                 .show(ui, |ui| {
@@ -723,47 +909,6 @@ impl App {
             .resizable(true)
             .default_width(520.0)
             .show(ctx, |ui| {
-                ui.strong("Emulator");
-                match &self.emulator {
-                    Some(path) => {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(path.display().to_string()).monospace().small(),
-                            )
-                            .selectable(true),
-                        );
-                    }
-                    None => {
-                        let text = match &self.config.emulator {
-                            Some(path) => format!("{} doesn't exist.", path.display()),
-                            None => "Not found next to the launcher or in the emulator's target folder. \
-                                     Build it with `cargo build --release` in the emulator's folder, \
-                                     or choose it here."
-                                .to_string(),
-                        };
-                        ui.colored_label(ui.visuals().warn_fg_color, text);
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("Choose…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.config.emulator = Some(path);
-                            self.emulator = launch::find_emulator(self.config.emulator.as_deref());
-                        }
-                    }
-                    let label = if self.config.emulator.is_none() {
-                        "Look again"
-                    } else {
-                        "Find automatically"
-                    };
-                    if ui.button(label).clicked() {
-                        self.config.emulator = None;
-                        self.emulator = launch::find_emulator(None);
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
                 ui.strong("Game folders");
                 ui.weak("Subfolders are included.");
                 let mut remove_folder = None;
@@ -776,10 +921,10 @@ impl App {
                     });
                 }
                 if ui.button("📁 Add folder…").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.add_folder(folder);
-                    }
+                    self.choose_folder();
                 }
+                ui.weak("Or type or paste its path:");
+                self.folder_path_input(ui);
 
                 let mut remove_file = None;
                 if !self.config.files.is_empty() {
@@ -821,7 +966,15 @@ fn region(game: &Game, record: Option<&GameRecord>) -> (Region, bool) {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.check_running(ctx);
+        self.check_machine();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.finish_game();
+        }
+        if self.playing.is_some() {
+            self.game_keys(ctx);
+            self.game_screen(ctx);
+            return;
+        }
         self.handle_dropped_files(ctx);
         self.handle_keys(ctx);
 
@@ -874,15 +1027,42 @@ impl eframe::App for App {
     fn auto_save_interval(&self) -> std::time::Duration {
         Duration::from_secs(5)
     }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(running) = self.running.take() {
-            let played = running.elapsed().as_secs();
-            let mut record = self.record(&running.key);
-            record.play_secs += played;
-            record.last_played = Some(format::unix_now().saturating_add(played));
-            self.set_record(&running.key, record);
-        }
-    }
 }
 
+fn visible_picture(picture: &[u8]) -> egui::ColorImage {
+    let mut pixels = Vec::with_capacity(VISIBLE_WIDTH * VISIBLE_HEIGHT * 3);
+    for row in picture.chunks_exact(256 * 3).skip(OVERSCAN).take(VISIBLE_HEIGHT) {
+        pixels.extend_from_slice(&row[OVERSCAN * 3..(OVERSCAN + VISIBLE_WIDTH) * 3]);
+    }
+    egui::ColorImage::from_rgb([VISIBLE_WIDTH, VISIBLE_HEIGHT], &pixels)
+}
+
+fn game_size(available: egui::Vec2) -> egui::Vec2 {
+    let scale = (available.x / VISIBLE_WIDTH as f32).min(available.y / VISIBLE_HEIGHT as f32);
+    let scale = if scale >= 1.0 { scale.floor() } else { scale };
+    egui::vec2(VISIBLE_WIDTH as f32 * scale, VISIBLE_HEIGHT as f32 * scale)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_visible_picture_crops_the_overscan() {
+        let mut picture = vec![0; 256 * 240 * 3];
+        // a red pixel at the first visible spot, (8, 8)
+        let i = (8 * 256 + 8) * 3;
+        picture[i] = 255;
+        let image = visible_picture(&picture);
+        assert_eq!(image.size, [240, 224]);
+        assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
+        assert_eq!(image.pixels[1], Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn test_game_size_keeps_whole_pixels() {
+        assert_eq!(game_size(egui::vec2(800.0, 700.0)), egui::vec2(720.0, 672.0));
+        assert_eq!(game_size(egui::vec2(1100.0, 500.0)), egui::vec2(480.0, 448.0));
+        assert_eq!(game_size(egui::vec2(120.0, 112.0)), egui::vec2(120.0, 112.0));
+    }
+}

@@ -54,8 +54,8 @@ impl Console {
 
     pub fn name(self) -> &'static str {
         match self {
-            Console::Nes => "Nes",
-            Console::TopLoader => "Top-Loading Nes",
+            Console::Nes => "NES",
+            Console::TopLoader => "Top-loading NES",
             Console::Famicom => "Famicom",
         }
     }
@@ -79,8 +79,8 @@ pub enum HeaderFormat {
 impl HeaderFormat {
     pub fn name(self) -> &'static str {
         match self {
-            HeaderFormat::ArchaicINes => "Archaic Nes",
-            HeaderFormat::INes => "iNes",
+            HeaderFormat::ArchaicINes => "Archaic iNES",
+            HeaderFormat::INes => "iNES",
             HeaderFormat::Nes2 => "NES 2.0"
         }
     }
@@ -188,7 +188,7 @@ fn rom_end(trainer: usize, prg: usize, chr: usize) -> Option<usize> {
 fn nes2_rom_size(lsb: u8, msb_nibble: u8, unit: usize) -> Result<usize, String> {
     if msb_nibble == 0x0F {
         let exponent = (lsb >> 2) as u32;
-        let multiplier = (lsb & 0b11) as usize * 1;
+        let multiplier = (lsb & 0b11) as usize * 2 + 1;
         1usize
             .checked_shl(exponent)
             .and_then(|size| size.checked_mul(multiplier))
@@ -391,6 +391,24 @@ pub fn is_rom_file(path: &Path) -> bool {
     is_rom(path) && path.is_file()
 }
 
+/// A path typed or pasted by the user. Quotes (from Explorer's "Copy as
+/// path") are removed, and when the launcher runs on Linux, as under WSL,
+/// a Windows path like `C:\Users\me\ROMs` becomes `/mnt/c/Users/me/ROMs`.
+pub fn path_from_input(input: &str) -> PathBuf {
+    let input = input.trim().trim_matches('"').trim();
+    let bytes = input.as_bytes();
+    let windows_drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    if cfg!(target_os = "linux") && windows_drive {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = input[3..].replace('\\', "/");
+        return PathBuf::from(format!("/mnt/{drive}/{rest}"));
+    }
+    PathBuf::from(input)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -407,6 +425,19 @@ mod test {
     const INES_MMC3: [u8; 16] = [
         0x4E, 0x45, 0x53, 0x1A, 2, 1, 0x42, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
+
+    #[test]
+    fn test_path_from_input() {
+        assert_eq!(path_from_input("  /home/me/roms "), PathBuf::from("/home/me/roms"));
+        assert_eq!(path_from_input("\"/home/me/my roms\""), PathBuf::from("/home/me/my roms"));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                path_from_input("\"C:\\Users\\Me\\NES ROMs\""),
+                PathBuf::from("/mnt/c/Users/Me/NES ROMs")
+            );
+            assert_eq!(path_from_input("D:/Games"), PathBuf::from("/mnt/d/Games"));
+        }
+    }
 
     #[test]
     fn test_clean_title() {

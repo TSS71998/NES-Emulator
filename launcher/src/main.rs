@@ -1,6 +1,6 @@
 //! NES Launcher: a game library window for the emulator. It finds your
-//! .nes files, shows what it knows about each one, and runs the one you
-//! pick in the emulator (a separate program, `nes_emulator`).
+//! .nes files, shows what it knows about each one, and plays the one you
+//! pick in its window (with the emulator as a library, `nes_emulator`).
 
 // release builds are a windowed app on Windows: no console window
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -8,8 +8,8 @@
 mod app;
 mod config;
 mod format;
-mod launch;
 mod library;
+mod machine;
 
 use eframe::egui;
 
