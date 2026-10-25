@@ -13,7 +13,10 @@ pub struct Config {
     pub files: Vec<PathBuf>,
     pub games: BTreeMap<String, GameRecord>,
     pub sort: SortKey,
-    pub descending: bool
+    pub descending: bool,
+    pub screen_size: ScreenSize,
+    pub tv_aspect: bool,
+    pub pause_on_focus_loss: bool
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24,6 +27,13 @@ pub struct GameRecord {
     pub no_oam_corruption: bool,
     pub last_played: Option<u64>,
     pub play_secs: u64
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenSize {
+    #[default]
+    WholePixels,
+    FillWindow
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

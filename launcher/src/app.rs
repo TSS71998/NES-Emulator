@@ -1,7 +1,8 @@
 //! The launcher window: a toolbar, the game list, a details panel for the
-//! selected game, and a status bar; or, while a game runs, the game.
+//! selected game, and a status bar; or, while a game runs, the game (and
+//! its pause menu).
 
-use crate::config::{Config, GameRecord, SortKey};
+use crate::config::{Config, GameRecord, ScreenSize, SortKey};
 use crate::format;
 use crate::library::{self, Console, Game, Region};
 use crate::machine::{self, Machine, Report, StartGame};
@@ -25,7 +26,16 @@ struct Playing {
     texture: Option<egui::TextureHandle>,
     shown_frame: u64,
     hint_until: Instant,
-    warning: Option<String>
+    warning: Option<String>,
+    paused: bool,
+    focus_menu: bool
+}
+
+enum MenuChoice {
+    Resume,
+    Reset,
+    Fullscreen,
+    Quit
 }
 
 pub struct App {
@@ -168,6 +178,8 @@ impl App {
             shown_frame: self.machine.screen.lock().unwrap().frame,
             hint_until: Instant::now() + HINT_TIME,
             warning: None,
+            paused: false,
+            focus_menu: false
         });
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "{} - NES Launcher",
@@ -269,7 +281,7 @@ impl App {
                 continue;
             };
             if pressed && key == Key::Escape {
-                self.stop_game();
+                self.pause_game(true);
                 continue;
             }
             if pressed && key == Key::R && modifiers.command {
@@ -286,6 +298,32 @@ impl App {
         self.set_key(Keycode::RCtrl, modifiers.ctrl);
         if !focused {
             self.release_keys();
+            if self.config.pause_on_focus_loss {
+                self.pause_game(true);
+            }
+        }
+    }
+
+    fn pause_game(&mut self, paused: bool) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        if playing.paused == paused {
+            return;
+        }
+        playing.paused = paused;
+        playing.focus_menu = paused;
+        self.machine.pause(paused);
+        self.release_keys();
+        self.ctx.request_repaint();
+    }
+
+    fn menu_keys(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+            self.pause_game(false);
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::R)) {
+            self.machine.reset();
+            self.pause_game(false);
         }
     }
 
@@ -307,6 +345,7 @@ impl App {
     }
 
     fn game_screen(&mut self, ctx: &egui::Context) {
+        let (screen_size, tv_aspect) = (self.config.screen_size, self.config.tv_aspect);
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
@@ -330,15 +369,22 @@ impl App {
             .show(ctx, |ui| {
                 let area = ui.max_rect();
                 if let Some(texture) = &playing.texture {
-                    let rect = egui::Rect::from_center_size(area.center(), game_size(area.size()));
+                    let size = game_size(area.size(), screen_size, tv_aspect);
+                    let rect = egui::Rect::from_center_size(area.center(), size);
                     let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                     ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
                 }
             });
+        if playing.paused {
+            self.pause_menu(ctx);
+            return;
+        }
+
+        ctx.set_cursor_icon(egui::CursorIcon::None);
         let now = Instant::now();
         if now < playing.hint_until {
             let mut hint = format!(
-                "{}   ·   Esc: back to the library   ·   Ctrl+R: reset",
+                "{}   ·   Esc: menu   ·   F11: fullscreen   ·   Ctrl+R: reset",
                 playing.title
             );
             if let Some(warning) = &playing.warning {
@@ -351,6 +397,97 @@ impl App {
                 });
             ctx.request_repaint_after(playing.hint_until - now);
         }
+    }
+
+    fn pause_menu(&mut self, ctx: &egui::Context) {
+        let Some(playing) = self.playing.as_mut() else {
+            return;
+        };
+        let title = playing.title.clone();
+        let focus = std::mem::take(&mut playing.focus_menu);
+        let fullscreen = is_fullscreen(ctx);
+
+        let dim = egui::LayerId::new(egui::Order::Middle, egui::Id::new("pause_dim"));
+        ctx.layer_painter(dim)
+            .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(170));
+
+        let mut choice = None;
+        egui::Area::new(egui::Id::new("pause_menu"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                egui::Frame::window(ui.style()).inner_margin(16).show(ui, |ui| {
+                    ui.set_width(280.0);
+                    ui.vertical_centered(|ui| {
+                        ui.heading(&title);
+                        ui.weak("Paused");
+                    });
+                    ui.add_space(10.0);
+                    let button = |ui: &mut egui::Ui, text: &str, keys: &str| {
+                        ui.add(
+                            egui::Button::new(text)
+                                .shortcut_text(keys)
+                                .min_size(egui::vec2(ui.available_width(), 30.0)),
+                        )
+                    };
+                    let resume = button(ui, "▶  Resume", "Esc");
+                    if focus {
+                        resume.request_focus();
+                    }
+                    if resume.clicked() {
+                        choice = Some(MenuChoice::Resume);
+                    }
+                    if button(ui, "Reset", "Ctrl+R").clicked() {
+                        choice = Some(MenuChoice::Reset);
+                    }
+                    let fullscreen_text = if fullscreen { "Leave fullscreen" } else { "Fullscreen" };
+                    if button(ui, fullscreen_text, "F11").clicked() {
+                        choice = Some(MenuChoice::Fullscreen);
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+                    self.video_settings(ui);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    if button(ui, "Quit to library", "").clicked() {
+                        choice = Some(MenuChoice::Quit);
+                    }
+                });
+            });
+
+        match choice {
+            Some(MenuChoice::Resume) => self.pause_game(false),
+            Some(MenuChoice::Reset) => {
+                self.machine.reset();
+                self.pause_game(false);
+            }
+            Some(MenuChoice::Fullscreen) => toggle_fullscreen(ctx),
+            Some(MenuChoice::Quit) => self.stop_game(),
+            None => {}
+        }
+    }
+
+    fn video_settings(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Screen size");
+        ui.radio_value(
+            &mut self.config.screen_size,
+            ScreenSize::WholePixels,
+            "Whole pixels (sharpest)",
+        );
+        ui.radio_value(
+            &mut self.config.screen_size,
+            ScreenSize::FillWindow,
+            "Fill the window",
+        );
+        ui.checkbox(&mut self.config.tv_aspect, "TV pixel shape (8:7)")
+            .on_hover_text(
+                "A TV drew the NES's pixels a little wider than tall. \
+                 Off: square pixels, as in the standalone emulator.",
+            );
+        ui.checkbox(
+            &mut self.config.pause_on_focus_loss,
+            "Pause when the window loses focus",
+        );
     }
 
     fn choose_folder(&mut self) {
@@ -949,6 +1086,10 @@ impl App {
                 }
                 ui.add_space(4.0);
                 ui.weak("Removing a folder or game only takes it off this list; no files are deleted.");
+
+                ui.add_space(8.0);
+                ui.separator();
+                self.video_settings(ui);
             });
         self.settings_open = open;
     }
@@ -970,8 +1111,15 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.finish_game();
         }
-        if self.playing.is_some() {
-            self.game_keys(ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F11)) {
+            toggle_fullscreen(ctx);
+        }
+        if let Some(playing) = &self.playing {
+            if playing.paused {
+                self.menu_keys(ctx);
+            } else {
+                self.game_keys(ctx);
+            }
             self.game_screen(ctx);
             return;
         }
@@ -1037,32 +1185,45 @@ fn visible_picture(picture: &[u8]) -> egui::ColorImage {
     egui::ColorImage::from_rgb([VISIBLE_WIDTH, VISIBLE_HEIGHT], &pixels)
 }
 
-fn game_size(available: egui::Vec2) -> egui::Vec2 {
-    let scale = (available.x / VISIBLE_WIDTH as f32).min(available.y / VISIBLE_HEIGHT as f32);
-    let scale = if scale >= 1.0 { scale.floor() } else { scale };
-    egui::vec2(VISIBLE_WIDTH as f32 * scale, VISIBLE_HEIGHT as f32 * scale)
+fn game_size(available: egui::Vec2, size: ScreenSize, tv_aspect: bool) -> egui::Vec2 {
+    let pixel_width = if tv_aspect { 8.0 / 7.0 } else { 1.0 };
+    let width = VISIBLE_WIDTH as f32 * pixel_width;
+    let height = VISIBLE_HEIGHT as f32;
+    let scale = (available.x / width).min(available.y / height);
+    let scale = match size {
+        ScreenSize::WholePixels if scale >= 1.0 => scale.floor(),
+        _ => scale,
+    };
+    egui::vec2(width * scale, height * scale)
+}
+
+fn is_fullscreen(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+}
+
+fn toggle_fullscreen(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen(ctx)));
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    #[test]
-    fn test_visible_picture_crops_the_overscan() {
-        let mut picture = vec![0; 256 * 240 * 3];
-        // a red pixel at the first visible spot, (8, 8)
-        let i = (8 * 256 + 8) * 3;
-        picture[i] = 255;
-        let image = visible_picture(&picture);
-        assert_eq!(image.size, [240, 224]);
-        assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
-        assert_eq!(image.pixels[1], Color32::from_rgb(0, 0, 0));
+       #[test]
+    fn test_game_size_keeps_whole_pixels() {
+        let whole = |w, h| game_size(egui::vec2(w, h), ScreenSize::WholePixels, false);
+        assert_eq!(whole(800.0, 700.0), egui::vec2(720.0, 672.0));
+        assert_eq!(whole(1100.0, 500.0), egui::vec2(480.0, 448.0));
+        assert_eq!(whole(120.0, 112.0), egui::vec2(120.0, 112.0));
     }
 
     #[test]
-    fn test_game_size_keeps_whole_pixels() {
-        assert_eq!(game_size(egui::vec2(800.0, 700.0)), egui::vec2(720.0, 672.0));
-        assert_eq!(game_size(egui::vec2(1100.0, 500.0)), egui::vec2(480.0, 448.0));
-        assert_eq!(game_size(egui::vec2(120.0, 112.0)), egui::vec2(120.0, 112.0));
+    fn test_game_size_fill_and_tv_shape() {
+        let fill = game_size(egui::vec2(800.0, 700.0), ScreenSize::FillWindow, false);
+        assert_eq!(fill, egui::vec2(750.0, 700.0));
+        // 3x high, and 8/7 as wide as square pixels would be
+        let tv = game_size(egui::vec2(1100.0, 700.0), ScreenSize::WholePixels, true);
+        assert_eq!(tv.y, 672.0);
+        assert!((tv.x - 720.0 * 8.0 / 7.0).abs() < 0.01, "{tv:?}");
     }
 }

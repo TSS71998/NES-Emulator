@@ -36,7 +36,8 @@ pub struct StartGame {
 enum Command {
     Start(Box<StartGame>),
     Stop,
-    Reset
+    Reset,
+    Pause(bool)
 }
 
 pub enum Report {
@@ -105,6 +106,10 @@ impl Machine {
 
     pub fn reset(&self) {
         let _ = self.commands.send(Command::Reset);
+    }
+
+    pub fn pause(&self, paused: bool) {
+        let _ = self.commands.send(Command::Pause(paused));
     }
 
     pub fn key(&self, key: Keycode, down: bool) {
@@ -189,11 +194,29 @@ impl MachineThread {
             warning
         });
 
+        let mut paused_since: Option<Instant> = None;
+        let mut paused_for = Duration::ZERO;
         'game: loop {
             loop {
-                match commands.try_recv() {
+                let command = if paused_since.is_some() {
+                    commands.recv().map_err(|_| TryRecvError::Disconnected)
+                } else {
+                    commands.try_recv()
+                };
+                match command {
                     Ok(Command::Stop) | Err(TryRecvError::Disconnected) => break 'game,
                     Ok(Command::Reset) => nes.reset(),
+                    Ok(Command::Pause(true)) => {
+                        if paused_since.is_none() {
+                            paused_since = Some(Instant::now());
+                            save_battery(&nes, &save_path, &mut saved);
+                        }
+                    }
+                    Ok(Command::Pause(false)) => {
+                        if let Some(since) = paused_since.take() {
+                            paused_for += since.elapsed();
+                        }
+                    }
                     Ok(Command::Start(_)) => {},
                     Err(TryRecvError::Empty) => break,
                 }
@@ -213,10 +236,13 @@ impl MachineThread {
             }
             limiter.wait();
         }
+        if let Some(since) = paused_since {
+            paused_for += since.elapsed();
+        }
         save_battery(&nes, &save_path, &mut saved);
         let _ = self.reports.send(Report::Stopped {
             key,
-            played: started.elapsed()
+            played: started.elapsed().saturating_sub(paused_for)
         });
     }
 
