@@ -53,7 +53,8 @@ pub struct App {
     failed_run: Option<(String, String)>,
     message: Option<(String, bool)>,
     settings_open: bool,
-    folder_input: String
+    folder_input: String,
+    fullscreen: bool
 }
 
 impl App {
@@ -80,7 +81,8 @@ impl App {
             failed_run: None,
             message: None,
             settings_open: false,
-            folder_input: String::new()
+            folder_input: String::new(),
+            fullscreen: false
         };
         app.rescan();
         app
@@ -282,7 +284,7 @@ impl App {
             };
             if pressed && key == Key::Escape {
                 self.pause_game(true);
-                continue;
+                return;
             }
             if pressed && key == Key::R && modifiers.command {
                 self.machine.reset();
@@ -399,13 +401,21 @@ impl App {
         }
     }
 
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Decorations(!on));
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+
     fn pause_menu(&mut self, ctx: &egui::Context) {
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
         let title = playing.title.clone();
         let focus = std::mem::take(&mut playing.focus_menu);
-        let fullscreen = is_fullscreen(ctx);
+        let fullscreen = self.fullscreen;
 
         let dim = egui::LayerId::new(egui::Order::Middle, egui::Id::new("pause_dim"));
         ctx.layer_painter(dim)
@@ -461,7 +471,7 @@ impl App {
                 self.machine.reset();
                 self.pause_game(false);
             }
-            Some(MenuChoice::Fullscreen) => toggle_fullscreen(ctx),
+            Some(MenuChoice::Fullscreen) => self.set_fullscreen(!self.fullscreen),
             Some(MenuChoice::Quit) => self.stop_game(),
             None => {}
         }
@@ -1112,7 +1122,7 @@ impl eframe::App for App {
             self.finish_game();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F11)) {
-            toggle_fullscreen(ctx);
+            self.set_fullscreen(!self.fullscreen);
         }
         if let Some(playing) = &self.playing {
             if playing.paused {
@@ -1196,20 +1206,23 @@ fn game_size(available: egui::Vec2, size: ScreenSize, tv_aspect: bool) -> egui::
     };
     egui::vec2(width * scale, height * scale)
 }
-
-fn is_fullscreen(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
-}
-
-fn toggle_fullscreen(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen(ctx)));
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
 
-       #[test]
+    #[test]
+    fn test_visible_picture_crops_the_overscan() {
+        let mut picture = vec![0; 256 * 240 * 3];
+        // a red pixel at the first visible spot, (8, 8)
+        let i = (8 * 256 + 8) * 3;
+        picture[i] = 255;
+        let image = visible_picture(&picture);
+        assert_eq!(image.size, [240, 224]);
+        assert_eq!(image.pixels[0], Color32::from_rgb(255, 0, 0));
+        assert_eq!(image.pixels[1], Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
     fn test_game_size_keeps_whole_pixels() {
         let whole = |w, h| game_size(egui::vec2(w, h), ScreenSize::WholePixels, false);
         assert_eq!(whole(800.0, 700.0), egui::vec2(720.0, 672.0));

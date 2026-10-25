@@ -131,13 +131,17 @@ cargo run -p nes_launcher --release      # from the project folder
 - **Game list.** Shows region, mapper, size, last played and total time played. Click a column header to sort, type in the search box (`Ctrl+F`) to filter, and use the arrow keys and `Enter` to pick and play.
 - **Details panel.** Shows what the ROM header says and the region and console the emulator will pick. Games using a mapper the emulator doesn't support yet are marked and can't be started.
 - **Per-game settings.** Region, console and OAM row corruption: the same choices as the emulator's `--region`, `--console` and `--no-oam-corruption`.
-- **Play.** Double-click a game, press `Enter` or click Play, and the game fills the window (at the biggest whole multiple of its size that fits). The keys and gamepads are the same as the standalone emulator's (see [Controls](#controls)). `Esc` goes back to the library and `Ctrl+R` resets. Battery saves go in the `.sav` file next to the ROM, and closing the window during a game saves it and its play time first.
+- **Play.** Double-click a game, press `Enter` or click Play, and the game fills the window. The keys and gamepads are the same as the standalone emulator's (see [Controls](#controls)). `F11` switches fullscreen on and off, and `Ctrl+R` resets. Battery saves go in the `.sav` file next to the ROM, and closing the window during a game saves it and its play time first.
+- **Pause menu.** `Esc` pauses the game and opens a menu over it: Resume (or `Esc` again), Reset, Fullscreen, the screen settings, and Quit to library. Time spent paused doesn't count as play time.
+- **Screen settings** (in the pause menu and in Settings). *Whole pixels* draws the game at the biggest whole multiple of its size that fits, so every pixel is the same size; *Fill the window* makes it as big as fits. *TV pixel shape* draws the pixels 8:7 wide, as a TV did. The game can also pause by itself when the window loses focus.
 
 The emulator runs on its own thread, at the console's frame rate, and SDL plays the sound and reads the gamepads, so the launcher needs the SDL2 libraries too. The launcher can't tell the left and right `Shift` and `Ctrl` keys apart, so either one works as player 2's Start and Select.
 
 On Linux, including WSL, the **Add folder…** and **Add games…** dialogs come from the desktop's portal service or, failing that, `zenity`. WSL has neither until you install zenity (`sudo apt install zenity`). You can also type or paste a folder's path in the box below **Add folder…** (on the empty library screen, or in Settings). Under WSL, Windows paths like `C:\Users\you\ROMs` are turned into `/mnt/c/Users/you/ROMs`.
 
-The launcher's settings and play times are saved in the platform's app data folder (…)
+WSL shows Linux windows on the Windows desktop through WSLg, which keeps a window's frame around it in fullscreen ([microsoft/wslg#530](https://github.com/microsoft/wslg/issues/530)), so the launcher takes the frame off while it's fullscreen. If the frame still shows, start the launcher with `env -u WAYLAND_DISPLAY cargo run -p nes_launcher --release`: that runs it through WSLg's X11 support, where removing the frame is known to work.
+
+The launcher's settings and play times are saved in the platform's app data folder (`%APPDATA%\NES Launcher\data` on Windows, `~/.local/share/neslauncher` on Linux, `~/Library/Application Support/NES-Launcher` on macOS).
 
  ## Controls 
 | NES button | Player 1 keys | Player 2 keys | Gamepad |
