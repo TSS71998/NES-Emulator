@@ -6,6 +6,7 @@
 //! `cartridge.rs` and `region.rs`, so the launcher shows what the emulator
 //! will actually do. If those rules change there, change them here too.
 
+use crate::gamelist::{self, GameList};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -253,7 +254,9 @@ pub struct Game {
     pub title: String,
     pub tags: Vec<String>,
     pub size: u64,
-    pub rom: Result<RomInfo, String>
+    pub rom: Result<RomInfo, String>,
+    pub checksum: Option<u32>,
+    pub list_name: Option<String>
 }
 
 impl Game {
@@ -268,20 +271,22 @@ impl Game {
             .unwrap_or_default();
         let (title, tags) = clean_title(&stem);
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let rom = if size > MAX_ROM_SIZE {
+        let file = if size > MAX_ROM_SIZE {
             Err("the file is too big to be an NES game".to_string())
         } else {
-            std::fs::read(path)
-                .map_err(|e| format!("can't read the file: {e}"))
-                .and_then(|raw| RomInfo::parse(&raw))
+            std::fs::read(path).map_err(|e| format!("can't read the file: {e}"))
         };
+        let rom = file.as_ref().map_err(Clone::clone).and_then(|raw| RomInfo::parse(raw));
+        let checksum = file.as_ref().ok().map(|raw| gamelist::rom_checksum(raw));
         Game {
             path: path.to_path_buf(),
             file_name,
             title,
             tags,
             size,
-            rom
+            rom,
+            checksum,
+            list_name: None
         }
     }
 
@@ -297,6 +302,44 @@ impl Game {
                 rom.mapper
             )),
             Ok(_) => None
+        }
+    }
+
+    pub fn name_from(&mut self, list: &GameList) {
+        self.list_name = self
+            .checksum
+            .and_then(|checksum| list.name(checksum))
+            .map(str::to_string);
+        let name = match &self.list_name {
+            Some(name) => name.clone(),
+            None => self
+                .path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        (self.title, self.tags) = clean_title(&name);
+    }
+
+    pub fn auto_region(&self, rom: &RomInfo) -> (Region, &'static str) {
+        let found = auto_region(rom, &self.file_name);
+        match &self.list_name {
+            Some(name) if found.1 == "default" => match auto_region(rom, name) {
+                (region, "file name") => (region, "game list"),
+                _ => found
+            },
+            _ => found
+        }
+    }
+
+    pub fn auto_console(&self) -> (Console, &'static str) {
+        let found = auto_console(&self.file_name);
+        match &self.list_name {
+            Some(name) if found.1 == "default" => match auto_console(name) {
+                (console, "file name") => (console, "game list"),
+                _ => found
+            },
+            _ => found
         }
     }
 }
@@ -383,8 +426,12 @@ pub fn scan(folders: &[PathBuf], files: &[PathBuf]) -> Vec<Game> {
         .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
         .map(|p| Game::load(&p))
         .collect();
-    games.sort_by_cached_key(|g| (g.title.to_lowercase(), g.file_name.to_lowercase()));
+    sort_by_title(&mut games);
     games
+}
+
+pub fn sort_by_title(games: &mut [Game]) {
+    games.sort_by_cached_key(|g| (g.title.to_lowercase(), g.file_name.to_lowercase()));
 }
 
 pub fn is_rom_file(path: &Path) -> bool {
@@ -525,6 +572,34 @@ mod test {
                 .iter()
                 .all(|g| g.path.is_absolute() && g.problem().is_none())
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_names_and_region_from_the_game_list() {
+        let dir = std::env::temp_dir().join(format!("nes_launcher_names_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rom = header(INES_MMC3, 2, 1);
+        let path = dir.join("zelda.nes");
+        std::fs::write(&path, &rom).unwrap();
+        let mut game = Game::load(&path);
+        let info = game.rom.clone().unwrap();
+        assert_eq!(game.auto_region(&info), (Region::Ntsc, "default"));
+
+        let crc = format!("{:08X}", gamelist::rom_checksum(&rom));
+        let dat = format!(
+            "game (\n\tname \"Legend of Zelda, The (Europe)\"\n\
+             \trom ( name \"Legend of Zelda, The (Europe).unh\" size 1 crc {crc} )\n)\n"
+        );
+        game.name_from(&GameList::from_dat(&dat));
+        assert_eq!(game.title, "The Legend of Zelda");
+        assert_eq!(game.tags, ["Europe"]);
+        assert_eq!(game.auto_region(&info), (Region::Pal, "game list"));
+        assert_eq!(game.auto_console(), (Console::Nes, "default"));
+
+        game.name_from(&GameList::default());
+        assert_eq!((game.title.as_str(), game.list_name.as_deref()), ("zelda", None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

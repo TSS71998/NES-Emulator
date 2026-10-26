@@ -16,7 +16,7 @@ use nes_emulator::nes::{FRAME_HEIGHT, FRAME_WIDTH, Nes, Options};
 use nes_emulator::region::{Console, Region};
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -38,6 +38,7 @@ enum Command {
     Stop,
     Reset,
     Pause(bool),
+    Speed(u32),
     SaveState { slot: usize, path: PathBuf },
     LoadState { slot: usize, path: PathBuf }
 }
@@ -122,6 +123,10 @@ impl Machine {
         let _ = self.commands.send(Command::Pause(paused));
     }
 
+    pub fn set_speed(&self, frames: u32) {
+        let _ = self.commands.send(Command::Speed(frames));
+    }
+
     pub fn save_state(&self, slot: usize, path: PathBuf) {
         let _ = self.commands.send(Command::SaveState { slot, path });
     }
@@ -194,9 +199,13 @@ impl MachineThread {
         };
 
         let mut warning = self.sdl_error.as_ref().map(|e| format!("No sound or gamepad: {e}"));
+        let muted = Rc::new(Cell::new(false));
         match self.open_audio() {
             Ok(mut output) => {
-                nes.set_audio_output(output.sample_rate(), move |samples| output.push(samples));
+                let muted = muted.clone();
+                nes.set_audio_output(output.sample_rate(), move |samples| {
+                    if muted.get() { 1.0 } else { output.push(samples) }
+                });
             }
             Err(e) => warning = warning.or(Some(format!("No Sound: {e}")))
         }
@@ -206,6 +215,8 @@ impl MachineThread {
         let mut saved = nes.battery_ram();
         let mut frames_since_save = 0;
         let mut limiter = FrameLimiter::new(nes.frames_per_second());
+        let frame_time = Duration::from_secs_f64(1.0 / nes.frames_per_second());
+        let mut speed = 1;
         let started = Instant::now();
         let _ = self.reports.send(Report::Started {
             key: key.clone(),
@@ -235,6 +246,10 @@ impl MachineThread {
                             paused_for += since.elapsed();
                         }
                     }
+                    Ok(Command::Speed(frames)) => {
+                        speed = frames;
+                        muted.set(frames != 1);
+                    }
                     Ok(Command::SaveState { slot, path }) => {
                         let result = write_state(&path, &nes.save_state());
                         let _ = self.reports.send(Report::StateSaved { slot, result });
@@ -252,10 +267,10 @@ impl MachineThread {
                     Err(TryRecvError::Empty) => break,
                 }
             }
-            let picture = nes.run_frame();
-            self.show(picture);
+           
+            frames_since_save += run_frames(&mut nes, speed, frame_time);
+            self.show(nes.picture());
 
-            frames_since_save += 1;
             if frames_since_save >= SAVE_INTERVAL_FRAMES {
                 frames_since_save = 0;
                 save_battery(&nes, &save_path, &mut saved);
@@ -366,6 +381,22 @@ fn key_event(key: Keycode, down: bool) -> Event {
             repeat: false,
         }
     }
+}
+
+fn run_frames(nes: &mut Nes, speed: u32, frame_time: Duration) -> u32 {
+    if speed > 0 {
+        for _ in 0..speed {
+            nes.run_frame();
+        }
+        return  speed;
+    }
+    let until = Instant::now() + frame_time;
+    let mut frames = 0;
+    while frames == 0 || Instant::now() < until {
+        nes.run_frame();
+        frames += 1;
+    }
+    frames
 }
 
 fn save_battery(nes: &Nes, path: &std::path::Path, saved: &mut Option<Vec<u8>>) {

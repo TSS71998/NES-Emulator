@@ -16,7 +16,10 @@ pub struct Config {
     pub descending: bool,
     pub screen_size: ScreenSize,
     pub tv_aspect: bool,
-    pub pause_on_focus_loss: bool
+    pub pause_on_focus_loss: bool,
+    pub fast_forward: FastForward,
+    pub view: LibraryView,
+    pub get_covers: bool
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -34,6 +37,53 @@ pub enum ScreenSize {
     #[default]
     WholePixels,
     FillWindow
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LibraryView {
+    #[default]
+    List,
+    Covers
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FastForward {
+    Double,
+    Triple,
+    #[default]
+    Four,
+    Eight,
+    Unlimited
+}
+
+impl FastForward {
+    pub const ALL: [FastForward; 5] = [
+        FastForward::Double,
+        FastForward::Triple,
+        FastForward::Four,
+        FastForward::Eight,
+        FastForward::Unlimited,
+    ];
+
+    pub fn frames(self) -> u32 {
+        match self {
+            FastForward::Double => 2,
+            FastForward::Triple => 3,
+            FastForward::Four => 4,
+            FastForward::Eight => 8,
+            FastForward::Unlimited => 0
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FastForward::Double => "2×",
+            FastForward::Triple => "3×",
+            FastForward::Four => "4×",
+            FastForward::Eight => "8×",
+            FastForward::Unlimited => "As fast as possible"
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

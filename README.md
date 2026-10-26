@@ -129,11 +129,13 @@ cargo run -p nes_launcher --release      # from the project folder
 
 - **Library.** Add folders (subfolders are included) or single `.nes` files, with the toolbar buttons or by dropping them onto the window. No-Intro style names are tidied up: `Legend of Zelda, The (USA) (Rev 1).nes` is listed as *The Legend of Zelda*, with `USA` and `Rev 1` as tags.
 - **Game list.** Shows region, mapper, size, last played and total time played. Click a column header to sort, type in the search box (`Ctrl+F`) to filter, and use the arrow keys and `Enter` to pick and play.
+- **Titles and covers.** **Get titles and covers** in Settings downloads No-Intro's list of NES games (about 3 MB, from the [libretro database](https://github.com/libretro/libretro-database)) and names your games from it. Games are recognized by a checksum of the ROM, so `smb.nes` is listed as *Super Mario Bros.* with its `World` tag, and the list's name can also give the region and console when the file name doesn't. Box art for the games it finds comes from [libretro-thumbnails](https://github.com/libretro-thumbnails/Nintendo_-_Nintendo_Entertainment_System), and games you add later get theirs too. **☰ List** and **🖼 Covers** in the toolbar switch between the list and a grid of covers (arrow keys and `Enter` work there too), and the selected game's cover is shown in the details panel. The list and covers are kept in the data folder (below), as `game-list.txt` and `covers/`, so they're only downloaded once.
 - **Details panel.** Shows what the ROM header says and the region and console the emulator will pick. Games using a mapper the emulator doesn't support yet are marked and can't be started.
 - **Per-game settings.** Region, console and OAM row corruption: the same choices as the emulator's `--region`, `--console` and `--no-oam-corruption`.
 - **Play.** Double-click a game, press `Enter` or click Play, and the game fills the window. The keys and gamepads are the same as the standalone emulator's (see [Controls](#controls)). `F11` switches fullscreen on and off, and `Ctrl+R` resets. Battery saves go in the `.sav` file next to the ROM, and closing the window during a game saves it and its play time first.
 - **Pause menu.** `Esc` pauses the game and opens a menu over it: Resume (or `Esc` again), Reset, Fullscreen, the screen settings, the save states, and Quit to library. Time spent paused doesn't count as play time.
 - **Save states.** Each game has 4 slots, shown in the pause menu with the picture and time of each save. Saving or loading there carries on playing; `F5` saves and `F8` loads the last slot used, without opening the menu. A state carries on exactly where it was saved (picture and sound), and only loads into the game, region and console it was made with. States are kept in the launcher's data folder (below), in `states/`.
+- **Fast forward.** Hold `Tab` to run the game faster: 4× normal speed, or 2×, 3×, 8× or as fast as the computer can, set in the screen settings. The sound is off while it runs fast, and it stops when you let go of `Tab`, pause, or leave the window.
 - **Screen settings** (in the pause menu and in Settings). *Whole pixels* draws the game at the biggest whole multiple of its size that fits, so every pixel is the same size; *Fill the window* makes it as big as fits. *TV pixel shape* draws the pixels 8:7 wide, as a TV did. The game can also pause by itself when the window loses focus.
 
 The emulator runs on its own thread, at the console's frame rate, and SDL plays the sound and reads the gamepads, so the launcher needs the SDL2 libraries too. The launcher can't tell the left and right `Shift` and `Ctrl` keys apart, so either one works as player 2's Start and Select.
@@ -189,7 +191,7 @@ The tests cover CPU instructions, PPU registers, VRAM mirroring, scrolling, spri
 | `src/joypad.rs` | Controller |
 | `src/region.rs` | NTSC, PAL and Dendy clocks and timing tables, and the console models |
 | `src/trace.rs` | CPU trace output in `nestest` log format |
-| `launcher/` | The game library window, which also plays the games (see [Launcher](#launcher)) |
+| `launcher/` | The game library window, which also plays the games (see [Launcher](#launcher)). `gamelist.rs` downloads the game list and covers |
 
 ## Acknowledgements and references
 

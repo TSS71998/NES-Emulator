@@ -2,23 +2,32 @@
 //! selected game, and a status bar; or, while a game runs, the game (and
 //! its pause menu).
 
-use crate::config::{Config, GameRecord, ScreenSize, SortKey};
+use crate::config::{Config, FastForward, GameRecord, LibraryView, ScreenSize, SortKey};
 use crate::format;
+use crate::gamelist::{self, GameList, News, Online};
 use crate::library::{self, Console, Game, Region};
 use crate::machine::{self, Machine, Report, StartGame};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextWrapMode};
 use egui_extras::{Column, TableBuilder};
 use sdl2::keyboard::Keycode;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 const ROW_HEIGHT: f32 = 24.0;
 
+const CARD_WIDTH: f32 = 150.0;
+const CARD_COVER_HEIGHT: f32 = 200.0;
+const CARD_HEIGHT: f32 = 240.0;
+const CARD_GAP: f32 = 14.0;
+
+const DETAILS_COVER_HEIGHT: f32 = 200.0;
+
 const SLOTS: usize = 4;
 
 const NOTICE_TIME: Duration = Duration::from_secs(3);
 
-const SLOT_PICTURE: egui::Vec2 = egui::vec2(132.0, 132.2);
+const SLOT_PICTURE: egui::Vec2 = egui::vec2(132.0, 123.2);
 
 const OVERSCAN: usize = 8;
 const VISIBLE_WIDTH: usize = 256 - 2 * OVERSCAN;
@@ -45,6 +54,37 @@ struct Slot {
     picture: Option<egui::TextureHandle>
 }
 
+enum Cover {
+    Loading,
+    Ready(egui::TextureHandle),
+    Missing
+}
+
+#[derive(Default)]
+struct Downloads {
+    list: bool,
+    cover_jobs: usize,
+    covers_done: usize,
+    covers_total: usize,
+    error: Option<String>
+}
+
+impl Downloads {
+    fn busy(&self) -> bool {
+        self.list || self.cover_jobs > 0
+    }
+
+    fn status(&self) -> Option<String> {
+        if self.list {
+            Some("Downloading the game list (3 MB)…".into())
+        } else if self.cover_jobs > 0 {
+            Some(format!("Downloading covers: {} of {}", self.covers_done, self.covers_total))
+        } else {
+            None
+        }
+    }
+}
+
 enum MenuChoice {
     Resume,
     SaveState(usize),
@@ -65,12 +105,19 @@ pub struct App {
     machine: Machine,
     playing: Option<Playing>,
     held_keys: Vec<Keycode>,
+    fast_forward: bool,
     ctx: egui::Context,
     failed_run: Option<(String, String)>,
     message: Option<(String, bool)>,
     settings_open: bool,
     folder_input: String,
-    fullscreen: bool
+    fullscreen: bool,
+    game_list: GameList, 
+    online: Online,
+    downloads: Downloads,
+    covers: HashMap<String, Cover>,
+    missing_covers: HashSet<String>,
+    grid_columns: usize
 }
 
 impl App {
@@ -93,12 +140,19 @@ impl App {
             machine: Machine::start(cc.egui_ctx.clone()),
             playing: None,
             held_keys: Vec::new(),
+            fast_forward: false,
             ctx: cc.egui_ctx.clone(),
             failed_run: None,
             message: None,
             settings_open: false,
             folder_input: String::new(),
-            fullscreen: false
+            fullscreen: false,
+            game_list: GameList::load(),
+            online: Online::start(cc.egui_ctx.clone()),
+            downloads: Downloads::default(),
+            covers: HashMap::new(),
+            missing_covers: HashSet::new(),
+            grid_columns: 1
         };
         app.rescan();
         app
@@ -106,7 +160,108 @@ impl App {
 
     fn rescan(&mut self) {
         self.games = library::scan(&self.config.folders, &self.config.files);
+        self.name_games();
+        self.fetch_missing_covers();
+    }
+
+    fn name_games(&mut self) {
+        for game in &mut self.games {
+            game.name_from(&self.game_list);
+        }
+        library::sort_by_title(&mut self.games);
         self.refresh_list();
+    }
+
+    fn get_titles_and_covers(&mut self) {
+        self.config.get_covers = true;
+        self.missing_covers.clear();
+        self.downloads.list = true;
+        self.downloads.error = None;
+        self.online.get_game_list();
+    }
+
+    fn fetch_missing_covers(&mut self) {
+        if !self.config.get_covers {
+            return;
+        }
+        let mut names: Vec<String>  = self
+            .games
+            .iter()
+            .filter_map(|game| game.list_name.clone())
+            .filter(|name| {
+                !self.missing_covers.contains(name)
+                    && !gamelist::cover_path(name).is_some_and(|path| path.is_file())
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        if !names.is_empty() {
+            self.downloads.cover_jobs += 1;
+            self.downloads.covers_total += names.len();
+            self.online.get_covers(names);
+        }
+    }
+
+    fn check_online(&mut self) {
+        while let Some(news) = self.online.poll() {
+            match news {
+                News::GameList(Ok(list)) => {
+                    self.downloads.list = false;
+                    self.game_list = list;
+                    self.name_games();
+                    self.fetch_missing_covers();
+                }
+                News::GameList(Err(error)) => {
+                    self.downloads.list = false;
+                    self.downloads.error = Some(error);
+                }
+                News::Cover { name, found } => {
+                    self.downloads.covers_done += 1;
+                    if found {
+                        self.covers.remove(&name);
+                    } else {
+                        self.missing_covers.insert(name);
+                    }
+                }
+                News::CoversDone { error } => {
+                    self.downloads.cover_jobs = self.downloads.cover_jobs.saturating_sub(1);
+                    if self.downloads.cover_jobs == 0 {
+                        self.downloads.covers_done = 0;
+                        self.downloads.covers_total = 0;
+                    }
+                    if error.is_some() {
+                        self.downloads.error = error;
+                    }
+                }
+                News::Picture { name, image } => {
+                    let cover = match image {
+                        Some(image) => Cover::Ready(self.ctx.load_texture(
+                            format!("cover {name}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        )),
+                        None => Cover::Missing
+                    };
+                    self.covers.insert(name, cover);
+                }
+            }
+        }
+    }
+
+    fn cover(&mut self, name: &str) -> Option<(egui::TextureId, egui::Vec2)> {
+        match self.covers.get(name) {
+            Some(Cover::Ready(texture)) => return Some((texture.id(), texture.size_vec2())),
+            Some(_) => return None,
+            None => {}
+        }
+        let cover = if gamelist::cover_path(name).is_some_and(|path| path.is_file()) {
+            self.online.read_cover(name);
+            Cover::Loading
+        } else {
+            Cover::Missing
+        };
+        self.covers.insert(name.to_string(), cover);
+        None
     }
 
     fn refresh_list(&mut self) {
@@ -177,14 +332,19 @@ impl App {
             return;
         }
         let record = self.record(key);
+        let (auto_region, region_source) = match &game.rom {
+            Ok(rom) => game.auto_region(rom),
+            Err(_) => (Region::Ntsc, "default")
+        };
+        let (auto_console, console_source) = game.auto_console();
+        let region = record.region.or((region_source == "game list").then_some(auto_region));
+        let console = record.console.or((console_source == "game list").then_some(auto_console));
         self.machine.play(StartGame {
             key: game.key(),
             path: game.path.clone(),
-            region: record
-                .region
+            region: region
                 .and_then(|r| nes_emulator::region::Region::parse(r.arg())),
-                console: record
-                    .console
+                console: console
                     .and_then(|c| nes_emulator::region::Console::parse(c.arg())),
                     oam_row_corruption: !record.no_oam_corruption
         });
@@ -373,6 +533,10 @@ impl App {
                 self.machine.reset();
                 continue;
             }
+            if key == Key::Tab {
+                self.set_fast_forward(pressed);
+                continue;
+            }
             if pressed && (key == Key::F5 || key == Key::F8) {
                 let slot = self.playing.as_ref().map_or(0, |p| p.slot);
                 if key == Key::F5 {
@@ -439,10 +603,21 @@ impl App {
         for key in std::mem::take(&mut self.held_keys) {
             self.machine.key(key, false);
         }
+        self.set_fast_forward(false);
+    }
+
+    fn set_fast_forward(&mut self, on: bool) {
+        if self.fast_forward != on {
+            self.fast_forward = on;
+            let frames = if on { self.config.fast_forward.frames() } else { 1 };
+            self.machine.set_speed(frames);
+            self.ctx.request_repaint();
+        }
     }
 
     fn game_screen(&mut self, ctx: &egui::Context) {
         let (screen_size, tv_aspect) = (self.config.screen_size, self.config.tv_aspect);
+        let fast_forward = self.fast_forward.then_some(self.config.fast_forward);
         let Some(playing) = self.playing.as_mut() else {
             return;
         };
@@ -485,7 +660,7 @@ impl App {
                 lines.push(RichText::new(warning));
             }
             lines.push(RichText::new(format!(
-                "{}   ·   Esc: menu   ·   F5/F8: save/load state   ·   F11: fullscreen",
+                                "{}   ·   Esc: menu   ·   Tab: fast forward   ·   F5/F8: save/load state   ·   F11: fullscreen",
                 playing.title
             )));
             ctx.request_repaint_after(playing.hint_until - now);
@@ -500,6 +675,19 @@ impl App {
                 });
                 ctx.request_repaint_after(*until - now);
             }
+        }
+        if let Some(speed) = fast_forward {
+            let text = match speed {
+                FastForward::Unlimited => "▶▶".to_string(),
+                speed => format!("▶▶ {}", speed.label())
+            };
+            egui::Area::new(egui::Id::new("fast_forward"))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new(text).strong().size(18.0));
+                    });
+                });
         }
         if !lines.is_empty() {
             egui::Area::new(egui::Id::new("game_hint"))
@@ -637,6 +825,17 @@ impl App {
             &mut self.config.pause_on_focus_loss,
             "Pause when the window loses focus",
         );
+
+        ui.horizontal(|ui| {
+            ui.label("Fast forward (hold Tab)");
+            egui::ComboBox::from_id_salt("fast_forward")
+                .selected_text(self.config.fast_forward.label())
+                .show_ui(ui, |ui| {
+                    for speed in FastForward::ALL {
+                        ui.selectable_value(&mut self.config.fast_forward, speed, speed.label());
+                    }
+                });
+        });
     }
 
     fn choose_folder(&mut self) {
@@ -745,22 +944,29 @@ impl App {
         if typing || self.shown.is_empty() {
             return;
         }
-        let (down, up, enter) = ctx.input(|i| {
+        let (down, up, left, right, enter) = ctx.input(|i| {
             (
                 i.key_pressed(Key::ArrowDown),
                 i.key_pressed(Key::ArrowUp),
+                i.key_pressed(Key::ArrowLeft),
+                i.key_pressed(Key::ArrowRight),
                 i.key_pressed(Key::Enter)
             )
         });
+        let covers = self.config.view == LibraryView::Covers;
+        let (left, right) = (left && covers, right && covers);
+        let row = if covers { self.grid_columns.max(1) } else { 1 };
         let position = self
             .selected
             .as_ref()
             .and_then(|key| self.shown.iter().position(|&i| &self.games[i].key() == key));
         let last = self.shown.len() - 1;
-        let new_position = match (down, up, position) {
-            (true, _, Some(p)) => Some((p + 1).min(last)),
-            (_, true, Some(p)) => Some(p.saturating_sub(1)),
-            (true, _, None) | (_, true, None) => Some(0),
+        let new_position = match position {
+            Some(p) if down => Some((p + row).min(last)),
+            Some(p) if up => Some(p.saturating_sub(row)),
+            Some(p) if right => Some((p + 1).min(last)),
+            Some(p) if left => Some(p.saturating_sub(1)),
+            None if down || up || left || right => Some(0),
             _ => None
         };
         if let Some(p) = new_position {
@@ -816,6 +1022,13 @@ impl App {
                 if ui.button("⚙ Settings").clicked() {
                     self.settings_open = !self.settings_open;
                 }
+                ui.separator();
+                let view = self.config.view;
+                ui.selectable_value(&mut self.config.view, LibraryView::Covers, "🖼 Covers");
+                ui.selectable_value(&mut self.config.view, LibraryView::List, "☰ List");
+                if self.config.view != view {
+                    self.scroll_to_selected = true;
+                }
             })
         });
     }
@@ -828,6 +1041,11 @@ impl App {
                 format!("{} of {} games", self.shown.len(), self.games.len())
             };
             ui.label(count);
+            if let Some(status) = self.downloads.status() {
+                ui.separator();
+                ui.spinner();
+                ui.weak(status);
+            }
             if let Some((text, error)) = &self.message {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let text = RichText::new(text);
@@ -970,6 +1188,126 @@ impl App {
         }
     }
 
+    fn game_covers(&mut self, ui: &mut egui::Ui) {
+        let columns = ((ui.available_width() - CARD_GAP) / (CARD_WIDTH + CARD_GAP)).max(1.0) as usize;
+        self.grid_columns = columns;
+        let rows = self.shown.len().div_ceil(columns);
+        let row_height = CARD_HEIGHT + CARD_GAP;
+        let selected = self.selected.clone();
+        let selected_index = selected
+            .as_ref()
+            .and_then(|key| self.shown.iter().position(|&i| &self.games[i].key() == key));
+        let scroll_to = selected_index.filter(|_| std::mem::take(&mut self.scroll_to_selected));
+        let mut clicked = None;
+        let mut activated = None;
+
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show_viewport(ui, |ui, viewport| {
+                let origin = ui.max_rect().min + egui::vec2(CARD_GAP, CARD_GAP);
+                ui.set_height(rows as f32 * row_height + CARD_GAP);
+                let card_rect = |index: usize| {
+                    let (row, column) = (index / columns, index % columns);
+                    let offset = egui::vec2(
+                        column as f32 * (CARD_WIDTH + CARD_GAP),
+                        row as f32 * row_height,
+                    );
+                    egui::Rect::from_min_size(origin + offset, egui::vec2(CARD_WIDTH, CARD_HEIGHT))
+                };
+                let first_row = (viewport.min.y / row_height).max(0.0) as usize;
+                let last_row = ((viewport.max.y / row_height) as usize + 1).min(rows);
+                let visible = (first_row * columns)..(last_row * columns).min(self.shown.len());
+
+                for index in visible {
+                    let game = &self.games[self.shown[index]];
+                    let key = game.key();
+                    let title = game.title.clone();
+                    let problem = game.problem();
+                    let hover = match &problem {
+                        Some(problem) => format!("{title}\n{problem}"),
+                        None if game.tags.is_empty() => title.clone(),
+                        None => format!("{title} ({})", game.tags.join(", ")),
+                    };
+                    let cover = game.list_name.clone().and_then(|name| self.cover(&name));
+
+                    let rect = card_rect(index);
+                    let response = ui.interact(rect, ui.id().with(&key), egui::Sense::click());
+                    let visuals = ui.visuals();
+                    let painter = ui.painter();
+                    let is_selected = selected.as_ref() == Some(&key);
+                    if is_selected {
+                        painter.rect_filled(rect.expand(5.0), 6.0, visuals.selection.bg_fill);
+                    } else if response.hovered() {
+                        painter.rect_filled(rect.expand(5.0), 6.0, visuals.widgets.hovered.weak_bg_fill);
+                    }
+
+                    let cover_area = egui::Rect::from_min_size(rect.min, egui::vec2(CARD_WIDTH, CARD_COVER_HEIGHT));
+                    match cover {
+                        Some((id, size)) => {
+                            let size = size * (cover_area.width() / size.x).min(cover_area.height() / size.y);
+                            let image = egui::Rect::from_min_size(
+                                egui::pos2(cover_area.center().x - size.x / 2.0, cover_area.bottom() - size.y),
+                                size,
+                            );
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            painter.image(id, image, uv, Color32::WHITE);
+                        }
+                        None => {
+                            painter.rect_filled(cover_area, 4.0, visuals.extreme_bg_color);
+                            painter.text(
+                                cover_area.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "NES",
+                                egui::FontId::proportional(28.0),
+                                visuals.widgets.noninteractive.bg_stroke.color,
+                            );
+                        }
+                    }
+
+                    let color = if problem.is_some() {
+                        visuals.weak_text_color()
+                    } else if is_selected {
+                        visuals.strong_text_color()
+                    } else {
+                        visuals.text_color()
+                    };
+                    let text = if problem.is_some() { format!("⚠ {title}") } else { title };
+                    let mut job = egui::text::LayoutJob::single_section(
+                        text,
+                        egui::TextFormat::simple(egui::FontId::proportional(13.0), color),
+                    );
+                    job.wrap = egui::text::TextWrapping {
+                        max_width: CARD_WIDTH,
+                        max_rows: 2,
+                        break_anywhere: false,
+                        overflow_character: Some('…'),
+                    };
+                    job.halign = Align::Center;
+                    let galley = ui.fonts(|fonts| fonts.layout_job(job));
+                    let text_pos = egui::pos2(rect.center().x, cover_area.bottom() + 6.0);
+                    ui.painter().galley(text_pos, galley, color);
+
+                    if response.clicked() {
+                        clicked = Some(key.clone());
+                    }
+                    if response.double_clicked() {
+                        activated = Some(key);
+                    }
+                    response.on_hover_text(hover);
+                }
+                if let Some(index) = scroll_to {
+                    ui.scroll_to_rect(card_rect(index).expand(CARD_GAP / 2.0), None);
+                }
+            });
+
+        if let Some(key) = clicked {
+            self.selected = Some(key);
+        }
+        if let Some(key) = activated {
+            self.play(&key);
+        }
+    }
+
     fn empty_library(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() / 3.0);
@@ -997,14 +1335,22 @@ impl App {
     }
 
     fn details(&mut self, ui: &mut egui::Ui) {
+        let cover = self
+            .selected_game()
+            .and_then(|game| game.list_name.clone())
+            .and_then(|name| self.cover(&name));
         let Some(game) = self.selected_game() else {
             ui.weak("Select a game to see its details.");
             return;
         };
         let key = game.key();
-        let file_name = game.file_name.clone();
         let mut record = self.record(&key);
 
+        if let Some((id, size)) = cover {
+            let size = size * (ui.available_width() / size.x).min(DETAILS_COVER_HEIGHT / size.y);
+            ui.add_space(6.0);
+            ui.vertical_centered(|ui| ui.add(egui::Image::new((id, size))));
+        }
         ui.add_space(4.0);
         ui.heading(&game.title);
         ui.label(RichText::new(&game.file_name).weak().small());
@@ -1031,8 +1377,8 @@ impl App {
                     .num_columns(2)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
-                        let (auto_region, region_source) = library::auto_region(rom, &file_name);
-                        let (auto_console, console_source) = library::auto_console(&file_name);
+                        let (auto_region, region_source) = game.auto_region(rom);
+                        let (auto_console, console_source) = game.auto_console();
                         ui.weak("Region");
                         ui.label(match record.region {
                             Some(region) => format!("{} (set below)", region.name()),
@@ -1082,10 +1428,7 @@ impl App {
             ui.colored_label(ui.visuals().warn_fg_color, problem);
         }
         let (auto_region, auto_console) = match &game.rom {
-            Ok(rom) => (
-                library::auto_region(rom, &file_name).0,
-                library::auto_console(&file_name).0,
-            ),
+            Ok(rom) => (game.auto_region(rom).0, game.auto_console().0),
             Err(_) => (Region::Ntsc, Console::Nes),
         };
 
@@ -1238,9 +1581,54 @@ impl App {
 
                 ui.add_space(8.0);
                 ui.separator();
+                self.titles_settings(ui);
+                ui.add_space(8.0);
+                ui.separator();
                 self.video_settings(ui);
             });
         self.settings_open = open;
+    }
+
+    fn titles_settings(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Titles and covers");
+        ui.weak(
+            "Names your games from No-Intro's list of NES games, and gets their box art \
+             from the libretro thumbnails project (both downloaded from GitHub). Games \
+             are recognized by their ROM, whatever the file is called.",
+        );
+        if self.game_list.is_empty() {
+            ui.label("Not downloaded yet.");
+        } else {
+            let found = self.games.iter().filter(|g| g.list_name.is_some()).count();
+            ui.label(format!(
+                "{found} of your {} games found in the list ({} games in it).",
+                self.games.len(),
+                self.game_list.len()
+            ));
+        }
+        ui.horizontal(|ui| {
+            let text = if self.game_list.is_empty() {
+                "⬇ Get titles and covers"
+            } else {
+                "⟳ Update titles and covers"
+            };
+            if ui.add_enabled(!self.downloads.busy(), egui::Button::new(text)).clicked() {
+                self.get_titles_and_covers();
+            }
+            if let Some(status) = self.downloads.status() {
+                ui.spinner();
+                ui.label(status);
+            }
+        });
+        if let Some(error) = &self.downloads.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        if !self.game_list.is_empty() {
+            let get_covers = ui.checkbox(&mut self.config.get_covers, "Get covers for games as they're added");
+            if get_covers.changed() {
+                self.fetch_missing_covers();
+            }
+        }
     }
 }
 
@@ -1249,7 +1637,7 @@ fn region(game: &Game, record: Option<&GameRecord>) -> (Region, bool) {
         return (region, true);
     }
     match &game.rom {
-        Ok(rom) => (library::auto_region(rom, &game.file_name).0, false),
+        Ok(rom) => (game.auto_region(rom).0, false),
         Err(_) => (Region::Ntsc, false)
     }
 }
@@ -1257,6 +1645,7 @@ fn region(game: &Game, record: Option<&GameRecord>) -> (Region, bool) {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.check_machine();
+        self.check_online();
         if ctx.input(|i| i.viewport().close_requested()) {
             self.finish_game();
         }
@@ -1294,6 +1683,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.shown.is_empty() {
                 self.empty_library(ui);
+            } else if self.config.view == LibraryView::Covers {
+                self.game_covers(ui);
             } else {
                 self.game_list(ui);
             }

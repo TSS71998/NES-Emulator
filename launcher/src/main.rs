@@ -8,6 +8,7 @@
 mod app;
 mod config;
 mod format;
+mod gamelist;
 mod library;
 mod machine;
 

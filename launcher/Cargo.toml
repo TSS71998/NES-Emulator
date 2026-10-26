@@ -11,3 +11,6 @@ egui_extras = "0.32.3"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 sdl2 = "0.38.0"
+crc32fast = "1.5.0"
+png = "0.18.1"
+ureq = { version = "3.5.0", features = ["platform-verifier"] }
