@@ -1253,6 +1253,25 @@ impl App {
         }
     }
 
+    fn covers_prompt(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label("Box art and proper titles come from online game lists.");
+                if let Some(status) = self.downloads.status() {
+                    ui.spinner();
+                    ui.label(status);
+                } else if ui.button("⬇ Get titles and covers").clicked() {
+                    self.get_titles_and_covers();
+                }
+            });
+            if let Some(error) = &self.downloads.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     fn game_covers(&mut self, ui: &mut egui::Ui) {
         let columns = ((ui.available_width() - CARD_GAP) / (CARD_WIDTH + CARD_GAP)).max(1.0) as usize;
         self.grid_columns = columns;
@@ -2009,6 +2028,9 @@ impl eframe::App for App {
             if self.shown.is_empty() {
                 self.empty_library(ui);
             } else if self.config.view == LibraryView::Covers {
+                if self.game_list.is_empty() {
+                    self.covers_prompt(ui);
+                }
                 self.game_covers(ui);
             } else {
                 self.game_list(ui);

@@ -57,7 +57,9 @@ impl Mmc1 {
     }
 
     fn prg_ram_enabled(&self) -> bool {
-        self.prg_bank & 0x10 == 0
+        let snrom = self.chr.is_ram && self.prg_rom.len() <= PRG_OUTER_BANK;
+        let snrom_disabled = snrom && self.chr_bank0 & 0x10 != 0;
+        self.prg_bank & 0x10 == 0 && !snrom_disabled
     }
 
     fn prg_offset(&self, addr: u16) -> usize {
@@ -145,7 +147,7 @@ impl Mapper for Mmc1 {
         self.prg_bank = r.u8();
         self.last_write_cycle = r.option_u64().map(|c| c as usize);
     }
-    
+
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x6000..=0x7FFF if self.prg_ram_enabled() => {
@@ -331,6 +333,22 @@ mod test {
 
         load(&mut mmc1, 0xE000, 0x10); // disable PRG-RAM
         assert_eq!(mmc1.cpu_read(0x6010), None);
+    }
+
+    #[test]
+    fn test_snrom_chr_bit_4_disables_prg_ram() {
+        let mut mmc1 = Mmc1::new(banked_rom(1, 16, 0, true));
+        mmc1.cpu_write(0x6000, 0x42);
+        load(&mut mmc1, 0xA000, 0x10);
+        assert_eq!(mmc1.cpu_read(0x6000), None);
+        mmc1.cpu_write(0x6000, 0x00); // ignored while it's off
+        load(&mut mmc1, 0xA000, 0x00);
+        assert_eq!(mmc1.cpu_read(0x6000), Some(0x42));
+
+        // with CHR-ROM (SxROM boards other than SNROM) the bit is just CHR
+        let mut mmc1 = Mmc1::new(banked_rom(1, 16, 16, true));
+        load(&mut mmc1, 0xA000, 0x10);
+        assert_eq!(mmc1.cpu_read(0x6000), Some(0));
     }
 
     #[test]
