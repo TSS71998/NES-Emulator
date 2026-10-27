@@ -704,7 +704,7 @@ impl App {
                 lines.push(RichText::new(warning));
             }
             lines.push(RichText::new(format!(
-                                "{}   ·   Esc: menu   ·   Tab: fast forward   ·   F5/F8: save/load state   ·   F11: fullscreen",
+                                "{}   ·   Esc or Back+Start: menu   ·   Tab: fast forward   ·   F5/F8: save/load state   ·   F11: fullscreen",
                 playing.title
             )));
             ctx.request_repaint_after(playing.hint_until - now);
