@@ -11,15 +11,16 @@
 use eframe::egui;
 use nes_emulator::audio::AudioOutput;
 use nes_emulator::frame_limiter::FrameLimiter;
-use nes_emulator::input::Input;
+use nes_emulator::input::{Input, PadLayout};
+use nes_emulator::joypad::JoypadButton;
 use nes_emulator::nes::{FRAME_HEIGHT, FRAME_WIDTH, Nes, Options};
 use nes_emulator::region::{Console, Region};
 use sdl2::event::Event;
-use sdl2::keyboard::{Keycode, Mod};
+use sdl2::controller::{Axis, Button};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError,  RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,9 @@ enum Command {
     Pause(bool),
     Speed(u32),
     SaveState { slot: usize, path: PathBuf },
-    LoadState { slot: usize, path: PathBuf }
+    LoadState { slot: usize, path: PathBuf },
+    Keyboard([JoypadButton; 2], bool),
+    PadLayouts(Box<[PadLayout; 2]>)
 }
 
 pub enum Report {
@@ -63,8 +66,17 @@ pub enum Report {
     StateLoaded {
         slot: usize,
         result: Result<(), String>
+    },
+    Gamepad {
+        button: Button,
+        pressed: bool
     }
 }
+
+const IDLE_POLL: Duration = Duration::from_millis(10);
+
+const STICK_PRESS: i16 = 20000;
+const STICK_RELEASE: i16 = 12000;
 
 pub struct Screen {
     pub picture: Vec<u8>,
@@ -73,7 +85,6 @@ pub struct Screen {
 
 pub struct Machine {
     commands: Sender<Command>,
-    keys: Sender<(Keycode, bool)>,
     reports: Receiver<Report>,
     pub screen: Arc<Mutex<Screen>>
 }
@@ -81,7 +92,6 @@ pub struct Machine {
 impl Machine {
     pub fn start(ctx: egui::Context) -> Machine {
         let (commands, command_receiver) = mpsc::channel();
-        let (keys, key_receiver) = mpsc::channel();
         let (report_sender, reports) = mpsc::channel();
         let screen = Arc::new(Mutex::new(Screen {
             picture: vec![0; FRAME_HEIGHT * FRAME_WIDTH * 3],
@@ -91,17 +101,19 @@ impl Machine {
         std::thread::Builder::new()
             .name("machine".into())
             .spawn(move || {
-                let mut thread = MachineThread::new(ctx, thread_screen, key_receiver, report_sender);
-                while let Ok(command) = command_receiver.recv() {
-                    if let Command::Start(game) = command {
-                        thread.run(*game, &command_receiver);
+                let mut thread = MachineThread::new(ctx, thread_screen, report_sender);
+                loop {
+                    match command_receiver.recv_timeout(IDLE_POLL) {
+                        Ok(Command::Start(game)) => thread.run(*game, &command_receiver),
+                        Ok(command) => thread.settings_command(command),
+                        Err(RecvTimeoutError::Timeout) => thread.poll_events(),
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
             })
             .expect("couldn't start the emulator thread");
         Machine {
             commands,
-            keys,
             reports,
             screen
         }
@@ -135,8 +147,12 @@ impl Machine {
         let _ = self.commands.send(Command::LoadState { slot, path });
     }
 
-    pub fn key(&self, key: Keycode, down: bool) {
-        let _ = self.keys.send((key, down));
+    pub fn set_keyboard(&self, buttons: [JoypadButton; 2], microphone: bool) {
+        let _ = self.commands.send(Command::Keyboard(buttons, microphone));
+    }
+
+    pub fn set_pad_layouts(&self, layouts: [PadLayout; 2]) {
+        let _ = self.commands.send(Command::PadLayouts(Box::new(layouts)));
     }
 
     pub fn poll(&self) -> Option<Report> {
@@ -156,15 +172,14 @@ struct MachineThread {
     audio: Option<sdl2::AudioSubsystem>,
     input: Rc<RefCell<Input>>,
     events: Rc<RefCell<Option<sdl2::EventPump>>>,
-    keys: Rc<Receiver<(Keycode, bool)>>,
-    sdl_error: Option<String>
+    sdl_error: Option<String>,
+    pad_reporter: Rc<PadReporter>
 }
 
 impl MachineThread {
     fn new(
         ctx: egui::Context,
         screen: Arc<Mutex<Screen>>,
-        keys: Receiver<(Keycode, bool)>,
         reports: Sender<Report>,
     ) -> MachineThread {
         sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
@@ -175,6 +190,13 @@ impl MachineThread {
         let audio = sdl.as_ref().and_then(|s| s.audio().ok());
         let controllers = sdl.as_ref().and_then(|s| s.game_controller().ok());
         let events = sdl.as_ref().and_then(|s| s.event_pump().ok());
+
+        let pad_reporter = Rc::new(PadReporter {
+            reports: reports.clone(),
+            ctx: ctx.clone(),
+            stick: Cell::new([false; 4])
+        });
+
         MachineThread {
             ctx,
             screen,
@@ -182,9 +204,9 @@ impl MachineThread {
             audio,
             input: Rc::new(RefCell::new(Input::new(controllers))),
             events: Rc::new(RefCell::new(events)),
-            keys: Rc::new(keys),
             sdl,
-            sdl_error
+            sdl_error,
+            pad_reporter
         }
     }
 
@@ -228,7 +250,13 @@ impl MachineThread {
         'game: loop {
             loop {
                 let command = if paused_since.is_some() {
-                    commands.recv().map_err(|_| TryRecvError::Disconnected)
+                    match commands.recv_timeout(IDLE_POLL) {
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.poll_events();
+                            continue;
+                        }
+                        command => command.map_err(|_| TryRecvError::Disconnected),
+                    }
                 } else {
                     commands.try_recv()
                 };
@@ -263,6 +291,9 @@ impl MachineThread {
                         }
                         let _ = self.reports.send(Report::StateLoaded { slot, result });
                     }
+                    Ok(command @ (Command::Keyboard(..) | Command::PadLayouts(_))) => {
+                        self.settings_command(command)
+                    }
                     Ok(Command::Start(_)) => {},
                     Err(TryRecvError::Empty) => break,
                 }
@@ -285,6 +316,25 @@ impl MachineThread {
             key,
             played: started.elapsed().saturating_sub(paused_for)
         });
+    }
+
+    fn settings_command(&self, command: Command) {
+        let mut input = self.input.borrow_mut();
+        match command {
+            Command::Keyboard(buttons, microphone) => input.set_keyboard(buttons, microphone),
+            Command::PadLayouts(layouts) => input.set_pad_layouts(*layouts),
+            _ => {}
+        }
+    }
+
+    fn poll_events(&self) {
+        if let Some(events) = self.events.borrow_mut().as_mut() {
+            let mut input = self.input.borrow_mut();
+            for event in events.poll_iter() {
+                input.handle_event(&event);
+                self.pad_reporter.event(&event);
+            }
+        }
     }
 
     fn show(&self, picture: &[u8]) {
@@ -327,15 +377,13 @@ impl MachineThread {
     fn input_hook(&self) -> impl FnMut(&mut [nes_emulator::joypad::Joypad; 2]) + 'static {
         let input = self.input.clone();
         let events = self.events.clone();
-        let keys = self.keys.clone();
+        let pad_reporter = self.pad_reporter.clone();
         move |joypads| {
             let mut input = input.borrow_mut();
-            for (key, down) in keys.try_iter() {
-                input.handle_event(&key_event(key, down));
-            }
             if let Some(events) = events.borrow_mut().as_mut() {
                 for event in events.poll_iter() {
                     input.handle_event(&event);
+                    pad_reporter.event(&event);
                 }
             }
             input.apply(joypads);
@@ -358,28 +406,6 @@ impl sdl2::audio::AudioCallback for Silence {
 
     fn callback(&mut self, out: &mut [f32]) {
         out.fill(0.0);
-    }
-}
-
-fn key_event(key: Keycode, down: bool) -> Event {
-    if down {
-        Event::KeyDown {
-            timestamp: 0,
-            window_id: 0,
-            keycode: Some(key),
-            scancode: None,
-            keymod: Mod::NOMOD,
-            repeat: false,
-        }
-    } else {
-        Event::KeyUp {
-            timestamp: 0,
-            window_id: 0,
-            keycode: Some(key),
-            scancode: None,
-            keymod: Mod::NOMOD,
-            repeat: false,
-        }
     }
 }
 
@@ -422,54 +448,74 @@ fn write_state(path: &Path, state: &[u8]) -> Result<(), String> {
     std::fs::rename(&new, path).map_err(error)
 }
 
-pub fn emulator_key(key: egui::Key) -> Option<Keycode> {
-    use egui::Key as K;
-    Some(match key {
-        K::ArrowUp => Keycode::Up,
-        K::ArrowDown => Keycode::Down,
-        K::ArrowLeft => Keycode::Left,
-        K::ArrowRight => Keycode::Right,
-        K::A => Keycode::A,
-        K::S => Keycode::S,
-        K::Enter => Keycode::Return,
-        K::Space => Keycode::Space,
-        K::I => Keycode::I,
-        K::K => Keycode::K,
-        K::J => Keycode::J,
-        K::L => Keycode::L,
-        K::G => Keycode::G,
-        K::F => Keycode::F,
-        K::M => Keycode::M,
-        _ => return None,
-    })
+struct PadReporter {
+    reports: Sender<Report>,
+    ctx: egui::Context,
+    stick: Cell<[bool; 4]>
+}
+
+impl PadReporter {
+    fn event(&self, event: &Event) {
+        match *event {
+            Event::ControllerButtonDown { button, .. } => self.send(button, true),
+            Event::ControllerButtonUp { button, .. } => self.send(button, false),
+            Event::ControllerAxisMotion { axis, value, .. } => {
+                let (first, negative, positive) = match axis {
+                    Axis::LeftY => (0, Button::DPadUp, Button::DPadDown),
+                    Axis::LeftX => (2, Button::DPadLeft, Button::DPadRight),
+                    _ => return,
+                };
+                let mut stick = self.stick.get();
+                for (index, button, push) in [(first, negative, -value), (first + 1, positive, value)] {
+                    let held = if stick[index] {
+                        push > STICK_RELEASE
+                    } else {
+                        push >= STICK_PRESS
+                    };
+                    if held != stick[index] {
+                        stick[index] = held;
+                        self.send(button, held);
+                    }
+                }
+                self.stick.set(stick);
+            }
+            _ => {}
+        }
+    }
+
+    fn send(&self, button: Button, pressed: bool) {
+        let _ = self.reports.send(Report::Gamepad { button, pressed });
+        self.ctx.request_repaint();
+    }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    #[test]
-    fn test_key_events_carry_the_key() {
-        assert!(matches!(
-            key_event(Keycode::A, true),
-            Event::KeyDown {
-                keycode: Some(Keycode::A),
-                ..
-            }
-        ));
-        assert!(matches!(
-            key_event(Keycode::Return, false),
-            Event::KeyUp {
-                keycode: Some(Keycode::Return),
-                ..
-            }
-        ));
+    fn stick(reporter: &PadReporter, axis: Axis, value: i16) {
+        reporter.event(&Event::ControllerAxisMotion { timestamp: 0, which: 0, axis, value });
     }
 
     #[test]
-    fn test_player_1_keys() {
-        assert_eq!(emulator_key(egui::Key::Enter), Some(Keycode::Return));
-        assert_eq!(emulator_key(egui::Key::ArrowLeft), Some(Keycode::Left));
-        assert_eq!(emulator_key(egui::Key::Escape), None);
+    fn test_left_stick_reports_as_the_d_pad() {
+        let (reports, received) = mpsc::channel();
+        let reporter = PadReporter { reports, ctx: egui::Context::default(), stick: Cell::new([false; 4]) };
+        stick(&reporter, Axis::LeftX, 25000);
+        stick(&reporter, Axis::LeftX, 15000); // not back far enough to let go
+        stick(&reporter, Axis::LeftX, 0);
+        stick(&reporter, Axis::LeftY, -30000);
+        stick(&reporter, Axis::RightX, 30000);
+        let got: Vec<(Button, bool)> = received
+            .try_iter()
+            .map(|r| match r {
+                Report::Gamepad { button, pressed } => (button, pressed),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [(Button::DPadRight, true), (Button::DPadRight, false), (Button::DPadUp, true)]
+        );
     }
-}
+} 

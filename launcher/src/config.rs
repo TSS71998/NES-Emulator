@@ -1,6 +1,7 @@
 //! What the launcher remembers between runs. eframe saves it (as RON) in the
 //! platform's app data folder, along with the window size and position.
 
+use crate::controls::Controls;
 use crate::library::{Console, Region};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +20,7 @@ pub struct Config {
     pub pause_on_focus_loss: bool,
     pub fast_forward: FastForward,
     pub view: LibraryView,
+    pub controls: Controls,
     pub get_covers: bool
 }
 

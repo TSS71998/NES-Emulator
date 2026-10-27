@@ -94,6 +94,9 @@ pub struct Bus<'call> {
     /// The CPU's I flag, which masks IRQs (see CPU::sync_irq_mask)
     irq_mask: bool,
 
+    mapper_clocked: bool,
+    mapper_watches_ppu_registers: bool,
+
     gameloop_callback: GameLoopCallback<'call>,
     audio_callback: Option<AudioCallback<'call>>,
     joypads: [Joypad; 2],
@@ -104,6 +107,9 @@ impl<'a> Bus<'a> {
     where
         F: FnMut(&NesPPU, &mut [Joypad; 2]) + 'call,
     {
+        let mapper_clocked = mapper.borrow().clocked();
+        let mapper_watches_ppu_registers = mapper.borrow().watches_ppu_registers();
+
         Bus {
             cpu_vram: [0; 2048],
             ppu: NesPPU::new(mapper.clone()),
@@ -135,6 +141,8 @@ impl<'a> Bus<'a> {
             ppu_divider: Region::Ntsc.ppu_divider() as u64,
             read_point: Region::Ntsc.cpu_divider() as u64 / 2 - 1,
             write_point: Region::Ntsc.cpu_divider() as u64 / 2 + 1,
+            mapper_clocked,
+            mapper_watches_ppu_registers,
             gameloop_callback: Box::from(gameloop_callback),
             audio_callback: None,
             joypads: [Joypad::new(), Joypad::new()],
@@ -482,6 +490,12 @@ impl<'a> Bus<'a> {
         self.master_clock += self.access_point(read);
         self.run_ppu();
 
+        if self.mapper_clocked {
+            let mut mapper = self.mapper.borrow_mut();
+            mapper.cpu_clock();
+            self.apu.set_expansion_audio(mapper.audio_output());
+        }
+
         self.apu.tick();
         if self.apu.take_dmc_stop() {
             self.stop_dmc_dma();
@@ -607,7 +621,12 @@ impl Mem for Bus<'_> {
         match addr {
             0x0000..=0x1FFF => self.cpu_vram[(addr & 0x07FF) as usize] = data,
 
-            0x2000..=0x3FFF => self.ppu.cpu_write(addr & 7, data),
+            0x2000..=0x3FFF => {
+                if self.mapper_watches_ppu_registers {
+                    self.mapper.borrow_mut().ppu_register_write(addr, data);
+                }
+                self.ppu.cpu_write(addr & 7, data);
+            }
 
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write_register(addr, data),
 

@@ -7,10 +7,9 @@
 //! will actually do. If those rules change there, change them here too.
 
 use crate::gamelist::{self, GameList};
+use nes_emulator::mapper::SUPPORTED;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
-pub const SUPPORTED_MAPPERS: [u16; 6] = [0, 1, 2, 3, 4, 7];
 
 const MAX_SCAN_DEPTH: usize = 8;
 
@@ -165,7 +164,7 @@ impl RomInfo {
     }
 
     pub fn supported(&self) -> bool {
-        SUPPORTED_MAPPERS.contains(&self.mapper)
+        SUPPORTED.iter().any(|&(number, _)| number == self.mapper)
     }
 }
 
@@ -200,25 +199,24 @@ fn nes2_rom_size(lsb: u8, msb_nibble: u8, unit: usize) -> Result<usize, String> 
 }
 
 pub fn mapper_name(mapper: u16) -> Option<&'static str> {
+    if let Some(&(_, name)) = SUPPORTED.iter().find(|&&(number, _)| number == mapper) {
+        return Some(name);
+    }
     Some(match mapper {
-        0 => "NROM",
-        1 => "MMC1",
-        2 => "UxROM",
-        3 => "CNROM",
-        4 => "MMC3",
-        5 => "MMC5",
-        7 => "AxROM",
-        9 => "MMC2",
-        10 => "MMC4",
-        11 => "Color Dreams",
+        16 => "Bandai FCG",
+        18 => "Jaleco SS88006",
         19 => "Namco 163",
-        23 | 25 => "VRC2/VRC4",
-        24 | 26 => "VRC6",
-        66 => "GxROM",
-        69 => "Sunsoft FME-7",
-        71 => "Camerica",
+        32 => "Irem G-101",
+        33 => "Taito TC0190",
+        48 => "Taito TC0690",
+        64 => "RAMBO-1",
+        65 => "Irem H3001",
+        67 => "Sunsoft-3",
+        68 => "Sunsoft-4",
+        73 => "VRC3",
+        75 => "VRC1",
+        80 => "Taito X1-005",
         85 => "VRC7",
-        206 => "DxROM",
         _ => return None,
     })
 }

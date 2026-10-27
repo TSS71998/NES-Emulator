@@ -6,7 +6,7 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
 
 ## Features
 
-- **Plays most of the NES library**: mappers 0 (NROM), 1 (MMC1), 2 (UxROM), 3 (CNROM), 4 (MMC3) and 7 (AxROM), which covers games like *Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man* and *Tetris*.
+- **Plays most of the NES library**: 32 mappers (see [Mappers](#mappers-and-roms)), from NROM, MMC1 and MMC3 (*Super Mario Bros. 1–3*, *Zelda*, *Final Fantasy*, *Mega Man*) to MMC5 (*Castlevania III*), MMC2 (*Punch-Out!!*), Konami's VRC chips and Sunsoft's FME-7, with the Famicom cartridges' extra sound channels.
 - **Accurate**: a cycle-accurate CPU and a dot-accurate PPU and APU that pass blargg's hardware test ROMs and all 146 of AccuracyCoin's tests (see [Technical](#technical)), so games that rely on precise timing work.
 - **Full sound**: all five APU channels through the NES's own mixer and output filters, with dynamic rate control to keep audio smooth.
 - **NTSC, PAL and Dendy**: the region is picked from the ROM header or file name, or set with `--region`.
@@ -63,9 +63,42 @@ This project was built by following [Writing NES Emulator in Rust](https://bugzm
   | APU noise/DMC/frame sequencer tables | NTSC | PAL | NTSC |
   | Frame rate | 60.0988 | 50.0070 | 50.0070 |
 
-### Mappers and ROMs
+ ### Mappers and ROMs
+ 
+| Mapper | Board | Games |
+|--------|-------|-------|
+| 0 | NROM | *Super Mario Bros.*, *Donkey Kong*, *Balloon Fight* |
+| 1 | MMC1 (SxROM) | *The Legend of Zelda*, *Metroid*, *Final Fantasy*, *Mega Man 2* |
+| 2 | UxROM | *Mega Man*, *Castlevania*, *Contra*, *DuckTales* |
+| 3 | CNROM | *Gradius*, *Arkanoid*, *Paperboy* |
+| 4 | MMC3 (TxROM) | *Super Mario Bros. 2* and *3*, *Mega Man 3–6*, *Kirby's Adventure* |
+| 5 | MMC5 (ExROM) | *Castlevania III*, *Just Breed*, *Laser Invasion*, *Uncharted Waters* |
+| 7 | AxROM | *Battletoads*, *Marble Madness*, *Wizards & Warriors* |
+| 9 | MMC2 (PNROM) | *Punch-Out!!* |
+| 10 | MMC4 (FxROM) | *Fire Emblem*, *Famicom Wars* |
+| 11 | Color Dreams | *Crystal Mines*, *Spiritual Warfare* |
+| 13 | CPROM | *Videomation* |
+| 21, 22, 23, 25 | Konami VRC2/VRC4 | *Contra* (Japan), *Gradius II*, *Ganbare Goemon*, *Tiny Toon Adventures* |
+| 24, 26 | Konami VRC6 | *Akumajou Densetsu*, *Madara*, *Esper Dream 2* |
+| 34 | BNROM, NINA-001 | *Deadly Towers*, *Impossible Mission II* |
+| 66 | GxROM | *Super Mario Bros. + Duck Hunt*, *Dragon Power* |
+| 69 | Sunsoft FME-7/5B | *Batman: Return of the Joker*, *Gimmick!*, *Hebereke* |
+| 70, 152 | Bandai | *Family Trainer*, *Arkanoid II* |
+| 71 | Camerica | *Micro Machines*, *Fire Hawk* |
+| 78 | Irem/Jaleco | *Holy Diver*, *Cosmo Carrier* |
+| 79 | NINA-03/06 | *Krazy Kreatures*, *Tiles of Fate* |
+| 87 | Jaleco/Konami | *City Connection*, *The Goonies* (Japan) |
+| 94 | UN1ROM | *Senjou no Ookami* |
+| 118 | TxSROM (MMC3) | *Armadillo*, *Goal! Two* |
+| 119 | TQROM (MMC3) | *Pin Bot*, *High Speed* |
+| 140 | Jaleco JF-11/14 | *Bio Senshi Dan* |
+| 180 | UNROM (Crazy Climber) | *Crazy Climber* |
+| 206 | Namco 108 (DxROM) | *Gauntlet*, *Karnov*, *Babel no Tou* |
 
 - Cartridges see every address the PPU puts on its bus, with the dot it happened on, and can raise the CPU's IRQ line. MMC3 counts rising edges of address line A12 with the chip's filter for short dips, exactly as the hardware does.
+- MMC5 works out where the PPU is the way the chip does, from the order of the PPU's fetches, for its scanline IRQ and for 8x16 sprites with their own CHR banks. Its ExRAM, fill mode and extended attributes (a CHR bank and palette per background tile) are emulated; its vertical split screen (used only by *Uchuu Keibitai SDF*) isn't.
+- MMC2/MMC4 switch CHR banks when the PPU reads the marker tiles, the read after the marker getting the new bank, as on the chips.
+- Expansion sound from VRC6 (two pulses and a sawtooth), Sunsoft 5B (three square waves with noise and envelope) and MMC5 (two pulses and PCM) is mixed in with the APU's, as a Famicom does. VRC4, VRC6 and FME-7 IRQs count CPU cycles (with the VRC's scanline prescaler).
 - MMC1 ignores a write on the cycle right after another, as the real chip does, so read-modify-write instructions on its registers work.
 - NES 2.0 headers: 12-bit mapper numbers, submappers, RAM sizes, CPU/PPU timing and console type.
 
@@ -90,7 +123,7 @@ The two disagree on one point: blargg's `sprite_overflow_tests/5.Emulator` (test
 
 ## Limitations
 
-- **Unsupported mappers.** The emulator exits with a message for mappers other than 0, 1, 2, 3, 4 and 7.
+- **Unsupported mappers.** The emulator exits with a message for mappers it doesn't have (see [Mappers](#mappers-and-roms)), such as Namco 163, VRC7 and the Bandai and Taito boards. No Famicom Disk System.
 - **MMC1 variants.** SOROM/SXROM boards with 16–32 KiB of banked PRG-RAM are treated as having one 8 KiB bank.
 - **PAL colors.** The PAL palette comes from the signal model, not from measurements of a real PAL console, so it may not match one exactly.
 - **One CPU/PPU clock alignment.** A console powers up in one of four alignments between its CPU and PPU clocks, which shift some PPU effects by a dot (which row OAM corruption hits, when a `$2001` write takes effect). The emulator always uses the same one.

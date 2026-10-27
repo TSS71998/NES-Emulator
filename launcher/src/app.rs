@@ -3,13 +3,15 @@
 //! its pause menu).
 
 use crate::config::{Config, FastForward, GameRecord, LibraryView, ScreenSize, SortKey};
+use crate::controls::{self, BUTTONS, PlayerControls, RESERVED_KEYS};
 use crate::format;
 use crate::gamelist::{self, GameList, News, Online};
 use crate::library::{self, Console, Game, Region};
-use crate::machine::{self, Machine, Report, StartGame};
+use crate::machine::{Machine, Report, StartGame};
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextWrapMode};
 use egui_extras::{Column, TableBuilder};
-use sdl2::keyboard::Keycode;
+use nes_emulator::joypad::JoypadButton;
+use sdl2::controller::Button;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -85,6 +87,28 @@ impl Downloads {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct Capture {
+    player: usize,
+    button: usize,
+    gamepad: bool
+}
+
+const MICROPHONE: usize = 8;
+
+#[derive(Clone, Copy)]
+enum Move {
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+}
+
+const PAD_REPEAT_DELAY: Duration = Duration::from_millis(400);
+const PAD_REPEAT: Duration = Duration::from_millis(70);
+
 enum MenuChoice {
     Resume,
     SaveState(usize),
@@ -104,7 +128,16 @@ pub struct App {
     scroll_to_selected: bool,
     machine: Machine,
     playing: Option<Playing>,
-    held_keys: Vec<Keycode>,
+    held_keys: Vec<Key>,
+    keyboard_sent: ([JoypadButton; 2], bool), 
+    controls_open: bool,
+    controls_player: usize,
+    capture: Option<Capture>,
+    capture_modifiers: egui::Modifiers,
+    capture_note: Option<String>,
+    pad_held: Vec<Button>,
+    pad_repeat: Option<(Button, Instant)>,
+    pad_keys: Vec<Key>,
     fast_forward: bool,
     ctx: egui::Context,
     failed_run: Option<(String, String)>,
@@ -140,6 +173,15 @@ impl App {
             machine: Machine::start(cc.egui_ctx.clone()),
             playing: None,
             held_keys: Vec::new(),
+            keyboard_sent: ([JoypadButton::empty(); 2], false),
+            controls_open: false,
+            controls_player: 0,
+            capture: None,
+            capture_modifiers: egui::Modifiers::NONE,
+            capture_note: None,
+            pad_held: Vec::new(),
+            pad_repeat: None,
+            pad_keys: Vec::new(),
             fast_forward: false,
             ctx: cc.egui_ctx.clone(),
             failed_run: None,
@@ -154,6 +196,9 @@ impl App {
             missing_covers: HashSet::new(),
             grid_columns: 1
         };
+
+        app.machine.set_pad_layouts(app.config.controls.pad_layouts());
+
         app.rescan();
         app
     }
@@ -410,6 +455,7 @@ impl App {
             }
             Report::StateSaved { slot, result } => self.state_finished(slot, result, "Saved to"),
             Report::StateLoaded { slot, result } => self.state_finished(slot, result, "Loaded"),
+            Report::Gamepad { button, pressed } => self.gamepad(button, pressed)
         }
     }
 
@@ -547,13 +593,14 @@ impl App {
                 continue;
             }
             
-            if let Some(key) = machine::emulator_key(physical_key.unwrap_or(key)) {
-                self.set_key(key, pressed);
+            let key = physical_key.unwrap_or(key);
+            self.held_keys.retain(|&k| k != key);
+            if pressed {
+                self.held_keys.push(key);
             }
         }
 
-        self.set_key(Keycode::RShift, modifiers.shift);
-        self.set_key(Keycode::RCtrl, modifiers.ctrl);
+        self.send_keyboard(modifiers);
         if !focused {
             self.release_keys();
             if self.config.pause_on_focus_loss {
@@ -588,21 +635,18 @@ impl App {
         }
     }
 
-    fn set_key(&mut self, key: Keycode, down: bool) {
-        let held = self.held_keys.contains(&key);
-        if down && !held {
-            self.held_keys.push(key);
-            self.machine.key(key, true);
-        } else if !down && held {
-            self.held_keys.retain(|&k| k != key);
-            self.machine.key(key, false);
+    fn send_keyboard(&mut self, modifiers: egui::Modifiers) {
+        let held = controls::held_names(&self.held_keys, modifiers);
+        let state = self.config.controls.keyboard_state(&held);
+        if state != self.keyboard_sent {
+            self.keyboard_sent = state;
+            self.machine.set_keyboard(state.0, state.1);
         }
     }
 
     fn release_keys(&mut self) {
-        for key in std::mem::take(&mut self.held_keys) {
-            self.machine.key(key, false);
-        }
+        self.held_keys.clear();
+        self.send_keyboard(egui::Modifiers::NONE);
         self.set_fast_forward(false);
     }
 
@@ -944,39 +988,56 @@ impl App {
         if typing || self.shown.is_empty() {
             return;
         }
-        let (down, up, left, right, enter) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::ArrowDown),
-                i.key_pressed(Key::ArrowUp),
-                i.key_pressed(Key::ArrowLeft),
-                i.key_pressed(Key::ArrowRight),
-                i.key_pressed(Key::Enter)
-            )
-        });
+        
+        let moves = [
+            (Key::ArrowDown, Move::Down),
+            (Key::ArrowUp, Move::Up),
+            (Key::ArrowLeft, Move::Left),
+            (Key::ArrowRight, Move::Right),
+            (Key::PageDown, Move::PageDown),
+            (Key::PageUp, Move::PageUp),
+        ];
+        for (key, movement) in moves {
+            if ctx.input(|i| i.key_pressed(key)) {
+                self.move_selection(movement);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(Key::Enter)) {
+            self.play_selected();
+        }
+    }
+
+    fn play_selected(&mut self) {
+        if let Some(key) = self.selected.clone() {
+            self.play(&key);
+        }
+    }
+
+    fn move_selection(&mut self, movement: Move) {
+        if self.shown.is_empty() {
+            return;
+        }
         let covers = self.config.view == LibraryView::Covers;
-        let (left, right) = (left && covers, right && covers);
+        if !covers && matches!(movement, Move::Left | Move::Right) {
+            return;
+        }
         let row = if covers { self.grid_columns.max(1) } else { 1 };
+        let page = if covers { row * 3 } else { 10 };
         let position = self
             .selected
             .as_ref()
             .and_then(|key| self.shown.iter().position(|&i| &self.games[i].key() == key));
         let last = self.shown.len() - 1;
-        let new_position = match position {
-            Some(p) if down => Some((p + row).min(last)),
-            Some(p) if up => Some(p.saturating_sub(row)),
-            Some(p) if right => Some((p + 1).min(last)),
-            Some(p) if left => Some(p.saturating_sub(1)),
-            None if down || up || left || right => Some(0),
-            _ => None
+        let new_position = match (position, movement) {
+            (None, _) => 0,
+            (Some(p), Move::Down) => (p + row).min(last),
+            (Some(p), Move::Up) => p.saturating_sub(row),
+            (Some(p), Move::Right) => (p + 1).min(last),
+            (Some(p), Move::Left) => p.saturating_sub(1),
+            (Some(p), Move::PageDown) => (p + page).min(last),
+            (Some(p), Move::PageUp) => p.saturating_sub(page),
         };
-        if let Some(p) = new_position {
-            self.select(Some(self.games[self.shown[p]].key()));
-        }
-        if enter {
-            if let Some(key) = self.selected.clone() {
-                self.play(&key);
-            }
-        }
+        self.select(Some(self.games[self.shown[new_position]].key()));
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -1021,6 +1082,10 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("⚙ Settings").clicked() {
                     self.settings_open = !self.settings_open;
+                }
+                if ui.button("🎮 Controls").clicked() {
+                    self.controls_open = !self.controls_open;
+                    self.capture = None;
                 }
                 ui.separator();
                 let view = self.config.view;
@@ -1589,6 +1654,264 @@ impl App {
         self.settings_open = open;
     }
 
+        fn controls_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.controls_open;
+        egui::Window::new("Controls")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    for player in 0..2 {
+                        let text = format!("Player {}", player + 1);
+                        if ui.selectable_value(&mut self.controls_player, player, text).clicked() {
+                            self.capture = None;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                let player = self.controls_player;
+                egui::Grid::new("bindings")
+                    .num_columns(3)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.strong("NES");
+                        ui.strong("Keyboard");
+                        ui.strong("Gamepad");
+                        ui.end_row();
+                        for (button, (_, name)) in BUTTONS.iter().enumerate() {
+                            ui.label(*name);
+                            self.binding_box(ui, Capture { player, button, gamepad: false });
+                            self.binding_box(ui, Capture { player, button, gamepad: true });
+                            ui.end_row();
+                        }
+                        if player == 1 {
+                            ui.label("Microphone");
+                            self.binding_box(ui, Capture { player, button: MICROPHONE, gamepad: false });
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(6.0);
+                let note = match (&self.capture_note, self.capture) {
+                    (Some(note), _) => RichText::new(note).color(ui.visuals().warn_fg_color),
+                    (None, Some(capture)) if capture.gamepad => {
+                        RichText::new("Press a gamepad button (Esc to stop)").strong()
+                    }
+                    (None, Some(_)) => RichText::new("Press a key (Backspace clears it, Esc stops)").strong(),
+                    (None, None) => RichText::new("Click a box, then press the key or gamepad button for it."),
+                };
+                ui.label(note);
+                ui.weak(
+                    "Esc, Tab, F5, F8 and F11 are the launcher's own keys while a game runs. \
+                     The first gamepad plugged in is player 1 and the second player 2; the \
+                     left stick works as the d-pad too.",
+                );
+                ui.add_space(4.0);
+                if ui.button(format!("Reset player {} to the defaults", player + 1)).clicked() {
+                    self.config.controls.players[player] = PlayerControls::default_for(player);
+                    if player == 1 {
+                        self.config.controls.microphone = vec!["M".into()];
+                    }
+                    self.capture = None;
+                    self.controls_changed();
+                }
+            });
+        if !open {
+            self.capture = None;
+        }
+        self.controls_open = open;
+    }
+
+    /// One box of the Controls window: what's bound, and click to change it.
+    fn binding_box(&mut self, ui: &mut egui::Ui, which: Capture) {
+        let names = self.bindings(which).clone();
+        let label = if names.is_empty() {
+            "—".to_string()
+        } else if which.gamepad {
+            names.iter().map(|n| controls::pad_label(n)).collect::<Vec<_>>().join(" / ")
+        } else {
+            names.iter().map(|n| controls::key_label(n)).collect::<Vec<_>>().join(" / ")
+        };
+        let waiting = self.capture == Some(which);
+        let text = if waiting { "…".to_string() } else { label };
+        let button = egui::Button::new(text)
+            .selected(waiting)
+            .min_size(egui::vec2(130.0, 0.0));
+        if ui.add(button).clicked() {
+            self.capture = if waiting { None } else { Some(which) };
+            self.capture_note = None;
+            self.capture_modifiers = ui.input(|i| i.modifiers);
+        }
+    }
+
+    fn bindings(&mut self, which: Capture) -> &mut Vec<String> {
+        let controls = &mut self.config.controls;
+        if which.button == MICROPHONE {
+            &mut controls.microphone
+        } else if which.gamepad {
+            &mut controls.players[which.player].pad[which.button]
+        } else {
+            &mut controls.players[which.player].keys[which.button]
+        }
+    }
+
+    fn set_binding(&mut self, which: Capture, names: Vec<String>) {
+        *self.bindings(which) = names;
+        self.capture = None;
+        self.capture_note = None;
+        self.controls_changed();
+    }
+
+    fn controls_changed(&mut self) {
+        self.machine.set_pad_layouts(self.config.controls.pad_layouts());
+        self.ctx.request_repaint();
+    }
+
+    /// While a keyboard box waits: takes the key presses (so nothing else
+    /// sees them) and binds the first one.
+    fn capture_key(&mut self, ctx: &egui::Context) {
+        let Some(capture) = self.capture else {
+            return;
+        };
+        let (events, modifiers) = ctx.input_mut(|i| {
+            let keys: Vec<egui::Event> = i
+                .events
+                .iter()
+                .filter(|e| matches!(e, egui::Event::Key { .. }))
+                .cloned()
+                .collect();
+            i.events.retain(|e| !matches!(e, egui::Event::Key { .. }));
+            (keys, i.modifiers)
+        });
+        for event in events {
+            let egui::Event::Key { key, physical_key, pressed: true, repeat: false, .. } = event else {
+                continue;
+            };
+            let key = physical_key.unwrap_or(key);
+            if key == Key::Escape {
+                self.capture = None;
+                self.capture_note = None;
+                return;
+            }
+            if capture.gamepad {
+                continue;
+            }
+            if key == Key::Backspace || key == Key::Delete {
+                self.set_binding(capture, Vec::new());
+            } else if RESERVED_KEYS.contains(&key) {
+                self.capture_note = Some(format!("{} is one of the launcher's keys", key.name()));
+            } else {
+                self.set_binding(capture, vec![key.name().to_string()]);
+            }
+            return;
+        }
+        if !capture.gamepad {
+            let before = self.capture_modifiers;
+            for (now, was, name) in [
+                (modifiers.shift, before.shift, "Shift"),
+                (modifiers.ctrl, before.ctrl, "Ctrl"),
+                (modifiers.alt, before.alt, "Alt"),
+            ] {
+                if now && !was {
+                    self.set_binding(capture, vec![name.to_string()]);
+                    break;
+                }
+            }
+        }
+        self.capture_modifiers = modifiers;
+    }
+
+    fn gamepad(&mut self, button: Button, pressed: bool) {
+        self.pad_held.retain(|&b| b != button);
+        if pressed {
+            self.pad_held.push(button);
+        }
+        if let Some(capture) = self.capture.filter(|c| c.gamepad) {
+            if pressed {
+                self.set_binding(capture, vec![button.string()]);
+            }
+            return;
+        }
+        if !pressed {
+            if self.pad_repeat.is_some_and(|(held, _)| held == button) {
+                self.pad_repeat = None;
+            }
+            return;
+        }
+        match &self.playing {
+            Some(playing) if !playing.paused => {
+                let back_start = self.pad_held.contains(&Button::Back)
+                    && self.pad_held.contains(&Button::Start);
+                if button == Button::Guide || back_start {
+                    self.pause_game(true);
+                }
+            }
+            Some(_) => self.menu_pad(button),
+            None => self.library_pad(button),
+        }
+    }
+
+    fn menu_pad(&mut self, button: Button) {
+        let key = match button {
+            Button::DPadUp => Key::ArrowUp,
+            Button::DPadDown => Key::ArrowDown,
+            Button::DPadLeft => Key::ArrowLeft,
+            Button::DPadRight => Key::ArrowRight,
+            Button::A => Key::Enter,
+            Button::B | Button::Start | Button::Guide => {
+                self.pause_game(false);
+                return;
+            }
+            _ => return,
+        };
+        self.pad_keys.push(key);
+        self.ctx.request_repaint();
+    }
+
+    fn library_pad(&mut self, button: Button) {
+        match button {
+            Button::DPadUp | Button::DPadDown | Button::DPadLeft | Button::DPadRight => {
+                self.pad_move(button);
+                self.pad_repeat = Some((button, Instant::now() + PAD_REPEAT_DELAY));
+            }
+            Button::LeftShoulder => self.move_selection(Move::PageUp),
+            Button::RightShoulder => self.move_selection(Move::PageDown),
+            Button::A | Button::Start => self.play_selected(),
+            Button::Y => {
+                self.config.view = match self.config.view {
+                    LibraryView::List => LibraryView::Covers,
+                    LibraryView::Covers => LibraryView::List,
+                };
+                self.scroll_to_selected = true;
+            }
+            _ => {}
+        }
+        self.ctx.request_repaint();
+    }
+
+    fn pad_move(&mut self, button: Button) {
+        self.move_selection(match button {
+            Button::DPadUp => Move::Up,
+            Button::DPadDown => Move::Down,
+            Button::DPadLeft => Move::Left,
+            _ => Move::Right,
+        });
+    }
+
+    fn repeat_pad(&mut self, ctx: &egui::Context) {
+        let Some((button, at)) = self.pad_repeat else {
+            return;
+        };
+        let now = Instant::now();
+        if now >= at {
+            self.pad_move(button);
+            self.pad_repeat = Some((button, now + PAD_REPEAT));
+            ctx.request_repaint_after(PAD_REPEAT);
+        } else {
+            ctx.request_repaint_after(at - now);
+        }
+    }
+
     fn titles_settings(&mut self, ui: &mut egui::Ui) {
         ui.strong("Titles and covers");
         ui.weak(
@@ -1649,6 +1972,7 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.finish_game();
         }
+        self.capture_key(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F11)) {
             self.set_fullscreen(!self.fullscreen);
         }
@@ -1663,6 +1987,7 @@ impl eframe::App for App {
         }
         self.handle_dropped_files(ctx);
         self.handle_keys(ctx);
+        self.repeat_pad(ctx);
 
         egui::TopBottomPanel::top("toolbar")
             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(8))
@@ -1690,6 +2015,7 @@ impl eframe::App for App {
             }
         });
         self.settings_window(ctx);
+        self.controls_window(ctx);
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             let screen = ctx.screen_rect();
@@ -1705,6 +2031,20 @@ impl eframe::App for App {
                 egui::FontId::proportional(22.0),
                 Color32::WHITE
             );
+        }
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        for key in self.pad_keys.drain(..) {
+            for pressed in [true, false] {
+                raw_input.events.push(egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
         }
     }
 

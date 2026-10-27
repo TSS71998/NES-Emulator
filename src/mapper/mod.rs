@@ -1,16 +1,31 @@
 mod axrom;
 mod cnrom;
+mod discrete;
+mod fme7;
 mod mmc1;
+mod mmc2;
 mod mmc3;
+mod mmc5;
+mod namco108;
 mod nrom;
 mod uxrom;
+mod vrc4;
+mod vrc6;
+mod vrc_irq;
 
 pub use axrom::Axrom;
 pub use cnrom::Cnrom;
+pub use discrete::{Board, Discrete};
+pub use fme7::Fme7;
 pub use mmc1::Mmc1;
+pub use mmc2::Mmc2;
 pub use mmc3::Mmc3;
+pub use mmc5::Mmc5;
+pub use namco108::Namco108;
 pub use nrom::Nrom;
 pub use uxrom::Uxrom;
+pub use vrc4::Vrc4;
+pub use vrc6::Vrc6;
 
 use crate::cartridge::{Mirroring, Rom};
 use crate::state::{StateReader, StateWriter};
@@ -30,9 +45,6 @@ pub trait Mapper {
         self.cpu_write(addr, data);
     }
 
-    /// PPU pattern-table read, $0000-$1FFF. Takes `&self` because the
-    /// renderer only has shared access to the PPU; mappers that latch on PPU
-    /// reads (MMC2/MMC4) can use a `Cell` for that state.
     fn ppu_read(&self, addr: u16) -> u8;
 
     /// PPU pattern-table write, $0000-$1FFF. Only does something with CHR-RAM.
@@ -40,18 +52,8 @@ pub trait Mapper {
 
     fn mirroring(&self) -> Mirroring;
 
-    /// Called with every address the PPU puts on its address bus: each
-    /// nametable, attribute and pattern fetch while rendering (several per
-    /// 8 dots), and v after $2006/$2007 accesses while rendering is off.
-    /// `ppu_cycle` counts PPU dots since power-on, so a mapper can time how
-    /// long an address line stayed low. MMC3 counts scanlines by watching
-    /// A12 (bit 12) rise as the PPU switches from one pattern table to the
-    /// other, e.g. from background tiles at $0xxx to sprites at $1xxx.
     fn ppu_address(&mut self, _addr: u16, _ppu_cycle: u64) {}
 
-    /// Level of the cartridge's IRQ line. The CPU takes the interrupt when
-    /// this is true and its I flag is clear, so a mapper keeps returning true
-    /// until the game acknowledges the IRQ (for MMC3, a write to $E000).
     fn irq_pending(&self) -> bool {
         false
     }
@@ -60,12 +62,42 @@ pub trait Mapper {
         false
     }
 
-    /// Battery-backed PRG-RAM to write to a .sav file, if the cartridge has any.
+    fn clocked(&self) -> bool {
+        false
+    }
+
+    fn cpu_clock(&mut self) {}
+
+    fn audio_output(&self) -> f32 {
+        0.0
+    }
+
+    fn watches_ppu_registers(&self) -> bool {
+        false
+    }
+
+    fn ppu_register_write(&mut self, _addr: u16, _data: u8) {}
+
+    fn nametable_pages(&self) -> [u8; 4] {
+        self.mirroring().nametable_pages()
+    }
+
+    fn maps_nametables(&self) -> bool {
+        false
+    }
+
+    fn nametable_read(&self, _addr: u16) -> Option<u8> {
+        None
+    }
+
+    fn nametable_write(&mut self, _addr: u16, _data: u8) -> bool {
+        false
+    }
+
     fn battery_ram(&self) -> Option<&[u8]> {
         None
     }
 
-    /// Restores battery-backed PRG-RAM from a .sav file.
     fn load_battery_ram(&mut self, _data: &[u8]) {}
 
     fn save_state(&self, w: &mut StateWriter);
@@ -75,30 +107,79 @@ pub trait Mapper {
 
 pub type SharedMapper = Rc<RefCell<dyn Mapper>>;
 
+/// The mappers the emulator has, by iNES number, with the boards' names.
+pub const SUPPORTED: [(u16, &str); 32] = [
+    (0, "NROM"),
+    (1, "MMC1"),
+    (2, "UxROM"),
+    (3, "CNROM"),
+    (4, "MMC3"),
+    (5, "MMC5"),
+    (7, "AxROM"),
+    (9, "MMC2"),
+    (10, "MMC4"),
+    (11, "Color Dreams"),
+    (13, "CPROM"),
+    (21, "VRC4"),
+    (22, "VRC2"),
+    (23, "VRC2/VRC4"),
+    (24, "VRC6"),
+    (25, "VRC2/VRC4"),
+    (26, "VRC6"),
+    (34, "BNROM/NINA-001"),
+    (66, "GxROM"),
+    (69, "Sunsoft FME-7"),
+    (70, "Bandai"),
+    (71, "Camerica"),
+    (78, "Irem/Jaleco 78"),
+    (79, "NINA-03/06"),
+    (87, "Jaleco 87"),
+    (94, "UN1ROM"),
+    (118, "TxSROM"),
+    (119, "TQROM"),
+    (140, "Jaleco 140"),
+    (152, "Bandai 152"),
+    (180, "Crazy Climber"),
+    (206, "Namco 108"),
+];
+
 pub fn from_rom(rom: Rom) -> Result<SharedMapper, String> {
+    fn shared(mapper: impl Mapper + 'static) -> Result<SharedMapper, String> {
+        Ok(Rc::new(RefCell::new(mapper)))
+    }
+    if let Some(board) = Board::for_rom(&rom) {
+        return shared(Discrete::new(rom, board));
+    }
     match rom.mapper {
-        0 => Ok(Rc::new(RefCell::new(Nrom::new(rom)))),
-        1 => Ok(Rc::new(RefCell::new(Mmc1::new(rom)))),
-        2 => Ok(Rc::new(RefCell::new(Uxrom::new(rom)))),
-        3 => Ok(Rc::new(RefCell::new(Cnrom::new(rom)))),
-        4 => Ok(Rc::new(RefCell::new(Mmc3::new(rom)))),
-        7 => Ok(Rc::new(RefCell::new(Axrom::new(rom)))),
-        n => Err(format!(
-            "mapper {} is not supported yet (supported: 0 NROM, 1 MMC1, 2 UxROM, 3 CNROM, 4 MMC3, 7 AxROM)",
-            n
-        )),
+        0 => shared(Nrom::new(rom)),
+        1 => shared(Mmc1::new(rom)),
+        2 => shared(Uxrom::new(rom)),
+        3 => shared(Cnrom::new(rom)),
+        4 | 118 | 119 => shared(Mmc3::new(rom)),
+        5 => shared(Mmc5::new(rom)),
+        7 => shared(Axrom::new(rom)),
+        9 | 10 => shared(Mmc2::new(rom)),
+        21 | 22 | 23 | 25 => shared(Vrc4::new(rom)),
+        24 | 26 => shared(Vrc6::new(rom)),
+        69 => shared(Fme7::new(rom)),
+        206 => shared(Namco108::new(rom)),
+        n => {
+            let supported: Vec<String> = SUPPORTED
+                .iter()
+                .map(|(number, name)| format!("{number} {name}"))
+                .collect();
+            Err(format!(
+                "mapper {n} is not supported yet (supported: {})",
+                supported.join(", ")
+            ))
+        }
     }
 }
 
-/// Offset into a ROM/RAM of `len` bytes for `bank` of `bank_size` bytes.
-/// Bank numbers wrap, because games often write bank numbers with unused
-/// high bits set, and smaller carts ignore the extra address lines.
 fn bank_offset(bank: usize, bank_size: usize, len: usize) -> usize {
     (bank * bank_size) % len
 }
 
-/// PRG-RAM size for carts that have it: whatever the header says, at least 8 KiB.
-/// (iNES headers often leave the size as 0.)
 fn prg_ram_size(rom: &Rom) -> usize {
     (rom.prg_ram_size + rom.prg_nvram_size).max(0x2000)
 }
@@ -122,6 +203,13 @@ impl Chr {
                 data: rom.chr_rom.clone(),
                 is_ram: false,
             }
+        }
+    }
+
+    fn ram(size: usize) -> Self {
+        Chr {
+            data: vec![0; size],
+            is_ram: true
         }
     }
 
@@ -236,7 +324,7 @@ pub(crate) mod test_util {
         fn save_state(&self, _w: &mut crate::state::StateWriter) {}
 
         fn load_state(&mut self, _r: &mut crate::state::StateReader) {}
-        
+
         fn cpu_read(&self, addr: u16) -> Option<u8> {
             (addr >= 0x8000).then(|| self.prg_rom[(addr as usize - 0x8000) % self.prg_rom.len()])
         }

@@ -1,12 +1,12 @@
 use crate::region::{FrameSequencerTiming, Region};
 use crate::state::{StateReader, StateWriter};
 
-const LENGTH_TABLE: [u8; 32] = [
+pub(crate) const LENGTH_TABLE: [u8; 32] = [
     10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96, 22,
     192, 24, 72, 26, 16, 28, 32, 30,
 ];
 
-const DUTY_TABLE: [[u8; 8]; 4] = [
+pub(crate) const DUTY_TABLE: [[u8; 8]; 4] = [
     [0, 1, 0, 0, 0, 0, 0, 0], // 12.5%
     [0, 1, 1, 0, 0, 0, 0, 0], // 25%
     [0, 1, 1, 1, 1, 0, 0, 0], // 50%
@@ -757,6 +757,8 @@ pub struct APU {
 
     mix_cache: f32,
     mix_dirty: bool,
+
+    expansion_audio: f32
 }
 
 impl APU {
@@ -795,6 +797,7 @@ impl APU {
             samples: Vec::with_capacity(sample_rate as usize / 30),
             mix_cache: 0.0,
             mix_dirty: true,
+            expansion_audio: 0.0
         }
     }
 
@@ -803,6 +806,10 @@ impl APU {
         self.frame_counter.reset();
         self.dmc.bytes_remaining = 0;
         self.dmc.disable_delay = 0;
+    }
+
+    pub fn set_expansion_audio(&mut self, level: f32) {
+        self.expansion_audio = level;
     }
 
     pub fn set_rate_adjust(&mut self, ratio: f64) {
@@ -988,7 +995,7 @@ impl APU {
             self.mix_dirty = false;
         }
 
-        self.sample_sum += self.mix_cache;
+        self.sample_sum += self.mix_cache + self.expansion_audio;
         self.sample_count += 1;
         self.sample_phase += self.sample_rate * self.rate_adjust;
         if self.sample_phase >= self.cpu_clock {

@@ -7,8 +7,9 @@
 //! Scrolling uses the real internal registers ("loopy" v, t, x and w), so
 //! mid-frame writes to $2000/$2005/$2006 take effect at the exact dot they
 //! happen on.
-
+#[cfg(test)]
 use crate::cartridge::Mirroring;
+
 use crate::mapper::SharedMapper;
 use crate::region::Region;
 use crate::render::frame::Frame;
@@ -88,6 +89,7 @@ pub struct NesPPU {
     skips_odd_dot: bool,
     nametable_base: [u16; 4],
     mapper_watches_bus: bool,
+    mapper_maps_nametables: bool,
     odd_frame: bool,
 
     last_data_read: Option<u64>,
@@ -139,6 +141,7 @@ pub trait PPU {
 impl NesPPU {
     pub fn new(mapper: SharedMapper) -> Self {
         let mapper_watches_bus = mapper.borrow().watches_ppu_bus();
+        let mapper_maps_nametables = mapper.borrow().maps_nametables();
         let region = Region::Ntsc;
         let mut ppu = NesPPU {
             mapper,
@@ -148,6 +151,7 @@ impl NesPPU {
             skips_odd_dot: region.skips_odd_frame_dot(),
             nametable_base: [0; 4],
             mapper_watches_bus,
+            mapper_maps_nametables,
             vram: [0; 4096],
             oam_data: [0; 64 * 4],
             oam_addr: 0,
@@ -195,9 +199,9 @@ impl NesPPU {
     }
 
     pub fn refresh_mirroring(&mut self) {
-        let mirroring = self.mapper.borrow().mirroring();
-        for (nt, base) in self.nametable_base.iter_mut().enumerate() {
-            *base = mirror_nametable(mirroring, 0x2000 + nt as u16 * 0x400);
+        let pages = self.mapper.borrow().nametable_pages();
+        for (base, page) in self.nametable_base.iter_mut().zip(pages) {
+            *base = page as u16 * 0x400;
         }
     }
 
@@ -430,6 +434,11 @@ impl NesPPU {
         if addr < 0x2000 {
             self.chr_read(addr)
         } else {
+            if self.mapper_maps_nametables {
+                if let Some(data) = self.mapper.borrow().nametable_read(addr) {
+                    return data;
+                }
+            }
             self.vram[self.mirror_vram_addr(addr) as usize]
         }
     }
@@ -569,22 +578,6 @@ fn oam_byte(index: u8, value: u8) -> u8 {
     if index & 3 == 2 { value & 0xE3 } else { value }
 }
 
-/// Maps a nametable address ($2000-$3EFF) to an index into the PPU's 4 KiB
-/// of nametable memory (2 KiB on the console; four-screen carts add 2 KiB).
-fn mirror_nametable(mirroring: Mirroring, addr: u16) -> u16 {
-    let vram_index = addr & 0x0FFF;
-    let name_table = vram_index / 0x400;
-    let offset = vram_index & 0x3FF;
-    match (mirroring, name_table) {
-        (Mirroring::Vertical, 2) | (Mirroring::Vertical, 3) => vram_index - 0x800,
-        (Mirroring::Horizontal, 1) | (Mirroring::Horizontal, 2) => vram_index - 0x400,
-        (Mirroring::Horizontal, 3) => vram_index - 0x800,
-        (Mirroring::SingleScreenLower, _) => offset,
-        (Mirroring::SingleScreenUpper, _) => 0x400 + offset,
-        _ => vram_index,
-    }
-}
-
 fn palette_index(addr: u16) -> usize {
     let index = (addr & 0x1F) as usize;
     if index & 0x13 == 0x10 {
@@ -654,14 +647,15 @@ impl PPU for NesPPU {
     fn write_to_data(&mut self, value: u8) {
         let addr = self.vram_addr();
         match addr {
-            // CHR-RAM; the mapper ignores the write if the cartridge has CHR-ROM
             0..=0x1fff => self.mapper.borrow_mut().ppu_write(addr, value),
-            // 0x3000..=0x3eff mirrors 0x2000..=0x2eff; mirror_vram_addr folds it down
+            
             0x2000..=0x3eff => {
-                self.vram[self.mirror_vram_addr(addr) as usize] = value;
+                let taken = self.mapper_maps_nametables
+                    && self.mapper.borrow_mut().nametable_write(addr, value);
+                if !taken {
+                    self.vram[self.mirror_vram_addr(addr) as usize] = value;
+                }
             }
-            // palette RAM is 6 bits wide, so only colours $00-$3F can be stored.
-            // palette_index handles the $3F10/$3F14/$3F18/$3F1C mirrors.
             _ => self.palette_table[palette_index(addr)] = value & 0x3F,
         }
         self.increment_vram_addr();

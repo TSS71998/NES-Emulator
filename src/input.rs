@@ -30,18 +30,21 @@ const KEYS: [(Keycode, usize, JoypadButton); 16] = [
 /// Held to speak into the Famicom's microphone (controller 2).
 const MICROPHONE_KEY: Keycode = Keycode::M;
 
-fn pad_button(button: Button) -> Option<JoypadButton> {
-    Some(match button {
-        Button::DPadUp => JoypadButton::UP,
-        Button::DPadDown => JoypadButton::DOWN,
-        Button::DPadLeft => JoypadButton::LEFT,
-        Button::DPadRight => JoypadButton::RIGHT,
-        Button::B | Button::Y => JoypadButton::BUTTON_A,
-        Button::A | Button::X => JoypadButton::BUTTON_B,
-        Button::Start => JoypadButton::START,
-        Button::Back => JoypadButton::SELECT,
-        _ => return None,
-    })
+pub type PadLayout = Vec<(Button, JoypadButton)>;
+
+pub fn default_pad_layout() -> PadLayout {
+    vec![
+        (Button::DPadUp, JoypadButton::UP),
+        (Button::DPadDown, JoypadButton::DOWN),
+        (Button::DPadLeft, JoypadButton::LEFT),
+        (Button::DPadRight, JoypadButton::RIGHT),
+        (Button::B, JoypadButton::BUTTON_A),
+        (Button::Y, JoypadButton::BUTTON_A),
+        (Button::A, JoypadButton::BUTTON_B),
+        (Button::X, JoypadButton::BUTTON_B),
+        (Button::Start, JoypadButton::START),
+        (Button::Back, JoypadButton::SELECT),
+    ]
 }
 
 struct Pad {
@@ -56,6 +59,7 @@ pub struct Input {
     pads: Vec<Pad>,
     keyboard: [JoypadButton; 2],
     microphone: bool,
+    layouts: [PadLayout; 2]
 }
 
 impl Input {
@@ -65,6 +69,7 @@ impl Input {
             pads: Vec::new(),
             keyboard: [JoypadButton::empty(); 2],
             microphone: false,
+            layouts: [default_pad_layout(), default_pad_layout()]
         }
     }
 
@@ -107,6 +112,18 @@ impl Input {
                 }
             }
             _ => {}
+        }
+    }
+
+    pub fn set_keyboard(&mut self, buttons: [JoypadButton; 2], microphone: bool) {
+        self.keyboard = buttons;
+        self.microphone = microphone;
+    }
+
+    pub fn set_pad_layouts(&mut self, layouts: [PadLayout; 2]) {
+        self.layouts = layouts;
+        for pad in &mut self.pads {
+            pad.buttons = JoypadButton::empty();
         }
     }
 
@@ -168,8 +185,13 @@ impl Input {
     }
 
     fn pad_button(&mut self, instance_id: u32, button: Button, pressed: bool) {
-        if let (Some(nes_button), Some(pad)) = (pad_button(button), self.pad(instance_id)) {
-            pad.buttons.set(nes_button, pressed);
+        let layouts = self.layouts.clone();
+        if let Some(pad) = self.pad(instance_id) {
+            for &(b, nes_button) in &layouts[pad.player] {
+                if b == button {
+                    pad.buttons.set(nes_button, pressed);
+                }
+            }
         }
     }
 }
@@ -265,10 +287,22 @@ mod test {
     }
 
     #[test]
-    fn test_pad_layout() {
-        assert_eq!(pad_button(Button::B), Some(JoypadButton::BUTTON_A));
-        assert_eq!(pad_button(Button::A), Some(JoypadButton::BUTTON_B));
-        assert_eq!(pad_button(Button::Back), Some(JoypadButton::SELECT));
-        assert_eq!(pad_button(Button::Guide), None);
+     fn test_pad_layout() {
+        let layout = default_pad_layout();
+        let nes = |button| layout.iter().find(|(b, _)| *b == button).map(|&(_, n)| n);
+        assert_eq!(nes(Button::B), Some(JoypadButton::BUTTON_A));
+        assert_eq!(nes(Button::A), Some(JoypadButton::BUTTON_B));
+        assert_eq!(nes(Button::Back), Some(JoypadButton::SELECT));
+        assert_eq!(nes(Button::Guide), None);
+    }
+
+    #[test]
+    fn test_keyboard_set_directly() {
+        let mut input = Input::new(None);
+        input.set_keyboard([JoypadButton::START, JoypadButton::BUTTON_B], true);
+        let mut joypads = [Joypad::new(), Joypad::new()];
+        input.apply(&mut joypads);
+        assert_eq!(pressed(&input), [JoypadButton::START, JoypadButton::BUTTON_B]);
+        assert!(joypads[1].microphone);
     }
 }

@@ -30,7 +30,15 @@ const CHR_BANK: usize = 0x0400;
 /// The MMC3 ignores a rise unless A12 has been low for a while (it really
 /// counts M2 edges, roughly 3 CPU cycles). That filters out the brief drops
 /// to $2xxx for nametable fetches between background tiles at $1xxx.
+/// 
+/// /// Two boards wire the CHR banks to more than CHR: TxSROM (mapper 118:
+/// Armadillo, Goal! Two) uses bit 7 of each nametable's CHR bank as the
+/// nametable page instead of the mirroring register, and TQROM (mapper
+/// 119: Pin Bot, High Speed) has 8 KiB of CHR-RAM besides its CHR-ROM,
+/// picked by bit 6 of a bank number.
 pub struct Mmc3 {
+    board: Board,
+    chr_ram: Vec<u8>,
     prg_rom: Vec<u8>,
     prg_ram: Vec<u8>,
     chr: Chr,
@@ -57,6 +65,13 @@ pub struct Mmc3 {
     a12_low_since: Option<u64>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Board {
+    Txrom,
+    Txsrom,
+    Tqrom,
+}
+
 /// A12 must have been low for this many PPU dots for a rise to count.
 const A12_FILTER_DOTS: u64 = 10;
 
@@ -64,7 +79,16 @@ impl Mmc3 {
     pub fn new(rom: Rom) -> Self {
         let four_screen = rom.screen_mirroring == Mirroring::FourScreen;
         let old_irq_behavior = rom.submapper == 4;
+
+        let board = match rom.mapper {
+            118 => Board::Txsrom,
+            119 => Board::Tqrom,
+            _ => Board::Txrom
+        };
+
         Mmc3 {
+            board,
+            chr_ram: vec![0; if board == Board::Tqrom { 0x2000 } else { 0 }],
             prg_ram: vec![0; prg_ram_size(&rom)],
             chr: Chr::new(&rom),
             prg_rom: rom.prg_rom,
@@ -105,14 +129,13 @@ impl Mmc3 {
         bank_offset(bank, PRG_BANK, len) + (addr as usize & (PRG_BANK - 1))
     }
 
-    fn chr_offset(&self, addr: u16) -> usize {
-        let addr = addr as usize & 0x1FFF;
-        let mut slot = addr / CHR_BANK;
+    fn chr_bank(&self, slot: usize) -> u8 {
+        let mut slot = slot;
         if self.bank_select & 0x80 != 0 {
             slot ^= 4;
         }
         let r = &self.registers;
-        let bank = match slot {
+        match slot {
             0 => r[0] & 0xFE,
             1 => r[0] | 0x01,
             2 => r[1] & 0xFE,
@@ -121,8 +144,20 @@ impl Mmc3 {
             5 => r[3],
             6 => r[4],
             _ => r[5],
-        } as usize;
+        }
+    }
+
+    fn chr_offset(&self, addr: u16) -> usize {
+        let addr = addr as usize & 0x1FFF;
+        let bank = self.chr_bank(addr / CHR_BANK) as usize;
         bank_offset(bank, CHR_BANK, self.chr.len()) + (addr & (CHR_BANK - 1))
+    }
+
+    fn chr_ram_offset(&self, addr: u16) -> Option<usize> {
+        let addr = addr as usize & 0x1FFF;
+        let bank = self.chr_bank(addr / CHR_BANK) as usize;
+        (self.board == Board::Tqrom && bank & 0x40 != 0)
+            .then(|| (bank & 7) * CHR_BANK + (addr & (CHR_BANK -1)))
     }
 
     /// One rising edge of A12: reload or decrement the counter, then raise
@@ -152,6 +187,9 @@ impl Mapper for Mmc3 {
     fn save_state(&self, w: &mut StateWriter) {
         w.bytes(&self.prg_ram);
         self.chr.save_state(w);
+        if self.board == Board::Tqrom {
+            w.bytes(&self.chr_ram);
+        }
         w.u8(self.bank_select);
         w.bytes(&self.registers);
         w.mirroring(self.mirroring);
@@ -168,6 +206,9 @@ impl Mapper for Mmc3 {
     fn load_state(&mut self, r: &mut StateReader) {
         r.bytes_into(&mut self.prg_ram);
         self.chr.load_state(r);
+        if self.board == Board::Tqrom {
+            r.bytes_into(&mut self.chr_ram);
+        }
         self.bank_select = r.u8();
         r.bytes_into(&mut self.registers);
         self.mirroring = r.mirroring();
@@ -180,7 +221,7 @@ impl Mapper for Mmc3 {
         self.irq_pending = r.bool();
         self.a12_low_since = r.option_u64();
     }
-    
+
     fn cpu_read(&self, addr: u16) -> Option<u8> {
         match addr {
             0x6000..=0x7FFF if self.prg_ram_enabled => {
@@ -230,12 +271,28 @@ impl Mapper for Mmc3 {
     }
 
     fn ppu_read(&self, addr: u16) -> u8 {
-        self.chr.read(self.chr_offset(addr))
+        match self.chr_ram_offset(addr) {
+            Some(offset) => self.chr_ram[offset],
+            None => self.chr.read(self.chr_offset(addr)),
+        }
     }
 
     fn ppu_write(&mut self, addr: u16, data: u8) {
-        let offset = self.chr_offset(addr);
-        self.chr.write(offset, data);
+        match self.chr_ram_offset(addr) {
+            Some(offset) => self.chr_ram[offset] = data,
+            None => {
+                let offset = self.chr_offset(addr);
+                self.chr.write(offset, data);
+            }
+        }
+    }
+
+    fn nametable_pages(&self) -> [u8; 4] {
+        if self.board == Board::Txsrom {
+            std::array::from_fn(|n| self.chr_bank(n) >> 7)
+        } else {
+            self.mirroring.nametable_pages()
+        }
     }
 
     fn mirroring(&self) -> Mirroring {
@@ -460,5 +517,28 @@ mod test {
         save[0x123] = 0x77;
         m.load_battery_ram(&save);
         assert_eq!(m.cpu_read(0x6123), Some(0x77));
+    }
+
+    #[test]
+    fn test_txsrom_nametables_follow_chr_banks() {
+        let mut m = Mmc3::new(banked_rom(118, 16, 16, false));
+        set_register(&mut m, 0, 0x80); // $0000-$07FF: bank 128 -> page 1
+        set_register(&mut m, 1, 0x02); // $0800-$0FFF: page 0
+        assert_eq!(m.nametable_pages(), [1, 1, 0, 0]);
+        m.cpu_write(0x8000, 0x80); // CHR inversion: R2-R5 cover $0000-$0FFF
+        set_register(&mut m, 0x83, 0x80);
+        assert_eq!(m.nametable_pages(), [0, 1, 0, 0]);
+    }
+
+    #[test]
+    fn test_tqrom_chr_ram_banks() {
+        let mut m = Mmc3::new(banked_rom(119, 16, 8, false));
+        set_register(&mut m, 2, 0x41); // $1000: CHR-RAM bank 1
+        m.ppu_write(0x1005, 0x99);
+        assert_eq!(m.ppu_read(0x1005), 0x99);
+        set_register(&mut m, 2, 0x01); // CHR-ROM bank 1
+        assert_eq!(m.ppu_read(0x1005), 1);
+        set_register(&mut m, 3, 0x41); // $1400: the same RAM bank
+        assert_eq!(m.ppu_read(0x1405), 0x99);
     }
 }

@@ -9,10 +9,20 @@ pub enum Mirroring {
     Vertical,
     Horizontal,
     FourScreen,
-    /// All four nametables show the first 1 KiB of VRAM (mapper-controlled).
     SingleScreenLower,
-    /// All four nametables show the second 1 KiB of VRAM (mapper-controlled).
     SingleScreenUpper,
+}
+
+impl Mirroring {
+    pub fn nametable_pages(self) -> [u8; 4] {
+        match self {
+            Mirroring::Vertical => [0, 1, 0, 1],
+            Mirroring::Horizontal => [0, 0, 1, 1],
+            Mirroring::FourScreen => [0, 1, 2, 3],
+            Mirroring::SingleScreenLower => [0; 4],
+            Mirroring::SingleScreenUpper => [1; 4],
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]

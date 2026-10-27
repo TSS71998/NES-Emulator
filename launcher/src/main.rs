@@ -7,6 +7,7 @@
 
 mod app;
 mod config;
+mod controls;
 mod format;
 mod gamelist;
 mod library;
