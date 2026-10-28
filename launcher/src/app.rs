@@ -18,6 +18,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 const ROW_HEIGHT: f32 = 24.0;
 
+const FAVORITE: Color32 = Color32::from_rgb(240, 190, 40);
+
 const CARD_WIDTH: f32 = 150.0;
 const CARD_COVER_HEIGHT: f32 = 200.0;
 const CARD_HEIGHT: f32 = 240.0;
@@ -198,6 +200,7 @@ impl App {
         };
 
         app.machine.set_pad_layouts(app.config.controls.pad_layouts());
+        app.send_volume();
 
         app.rescan();
         app
@@ -314,9 +317,11 @@ impl App {
         let mut shown: Vec<usize> = (0..self.games.len())
             .filter(|&i| {
                 let game = &self.games[i];
-                search.is_empty()
+                let favorite = || self.config.games.get(&game.key()).is_some_and(|r| r.favorite);
+                (search.is_empty()
                     || game.title.to_lowercase().contains(&search)
-                    || game.file_name.to_lowercase().contains(&search)
+                    || game.file_name.to_lowercase().contains(&search))
+                    && (!self.config.favorites_only || favorite())
             })
             .collect();
         let config = &self.config;
@@ -350,6 +355,17 @@ impl App {
 
     fn record(&self, key: &str) -> GameRecord {
         self.config.games.get(key).cloned().unwrap_or_default()
+    }
+
+    fn toggle_favorite(&mut self, key: &str) {
+        let mut record = self.record(key);
+        record.favorite = !record.favorite;
+        self.set_record(key, record);
+        self.refresh_list();
+    }
+
+    fn send_volume(&self) {
+        self.machine.set_volume(self.config.volume.gain(self.config.muted));
     }
 
     fn set_record(&mut self, key: &str, record: GameRecord) {
@@ -590,6 +606,13 @@ impl App {
                 } else {
                     self.load_state(slot);
                 }
+                continue;
+            }
+            if pressed && key == Key::F9 {
+                self.config.muted = !self.config.muted;
+                self.send_volume();
+                let text = if self.config.muted { "Sound off (F9)" } else { "Sound on" };
+                self.notice(text, false);
                 continue;
             }
             
@@ -880,6 +903,17 @@ impl App {
                     }
                 });
         });
+
+        ui.add_space(6.0);
+        ui.strong("Sound");
+        let before = (self.config.volume, self.config.muted);
+        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut self.config.volume.0, 0..=100).suffix("%"));
+            ui.checkbox(&mut self.config.muted, "Mute (F9)");
+        });
+        if (self.config.volume, self.config.muted) != before {
+            self.send_volume();
+        }
     }
 
     fn choose_folder(&mut self) {
@@ -1094,6 +1128,14 @@ impl App {
                 if self.config.view != view {
                     self.scroll_to_selected = true;
                 }
+                ui.separator();
+                let favorites = ui
+                    .selectable_label(self.config.favorites_only, "★ Favorites")
+                    .on_hover_text("Show only your favorite games");
+                if favorites.clicked() {
+                    self.config.favorites_only = !self.config.favorites_only;
+                    self.refresh_list();
+                }
             })
         });
     }
@@ -1133,6 +1175,7 @@ impl App {
         let mut clicked = None;
         let mut activated = None;
         let mut sort_by = None;
+        let mut starred = None;
 
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -1186,6 +1229,18 @@ impl App {
                     let problem = game.problem();
                     row.col(|ui| {
                         ui.style_mut().wrap_mode = Some(TextWrapMode::Truncate);
+                        let favorite = record.is_some_and(|r| r.favorite);
+                        let star = if favorite {
+                            RichText::new("★").color(FAVORITE)
+                        } else {
+                            RichText::new("☆").weak()
+                        };
+                        let star = ui.add(egui::Button::new(star).frame(false)).on_hover_text(
+                            if favorite { "Take out of favorites" } else { "Add to favorites" },
+                        );
+                        if star.clicked() {
+                            starred = Some(game.key());
+                        }
                         if problem.is_some() {
                             ui.label(RichText::new("⚠").color(ui.visuals().warn_fg_color));
                         }
@@ -1236,6 +1291,9 @@ impl App {
                 });
             });
 
+        if let Some(key) = starred {
+            self.toggle_favorite(&key);
+        }
         if let Some(key) = sort_by {
             if self.config.sort == key {
                 self.config.descending = !self.config.descending;
@@ -1313,6 +1371,7 @@ impl App {
                         None => format!("{title} ({})", game.tags.join(", ")),
                     };
                     let cover = game.list_name.clone().and_then(|name| self.cover(&name));
+                    let favorite = self.config.games.get(&key).is_some_and(|r| r.favorite);
 
                     let rect = card_rect(index);
                     let response = ui.interact(rect, ui.id().with(&key), egui::Sense::click());
@@ -1346,6 +1405,17 @@ impl App {
                                 visuals.widgets.noninteractive.bg_stroke.color,
                             );
                         }
+                    }
+                    if favorite {
+                        let corner = cover_area.right_top() + egui::vec2(-14.0, 14.0);
+                        painter.circle_filled(corner, 11.0, Color32::from_black_alpha(160));
+                        painter.text(
+                            corner,
+                            egui::Align2::CENTER_CENTER,
+                            "★",
+                            egui::FontId::proportional(16.0),
+                            FAVORITE,
+                        );
                     }
 
                     let color = if problem.is_some() {
@@ -1408,6 +1478,14 @@ impl App {
                 ui.add_space(12.0);
                 ui.weak("or type or paste its path:");
                 ui.allocate_ui(egui::vec2(460.0, 24.0), |ui| self.folder_path_input(ui));
+            } else if self.config.favorites_only && self.search.is_empty() {
+                ui.heading("No favorites yet");
+                ui.label("Click the ☆ next to a game (or press X on a gamepad) to add it.");
+                ui.add_space(8.0);
+                if ui.button("Show all games").clicked() {
+                    self.config.favorites_only = false;
+                    self.refresh_list();
+                }
             } else {
                 ui.heading("No matches");
                 ui.label(format!(
@@ -1438,6 +1516,10 @@ impl App {
         ui.add_space(4.0);
         ui.heading(&game.title);
         ui.label(RichText::new(&game.file_name).weak().small());
+        let star = if record.favorite { "★ Favorite" } else { "☆ Add to favorites" };
+        if ui.add(egui::Button::new(star).selected(record.favorite)).clicked() {
+            record.favorite = !record.favorite;
+        }
         if !game.tags.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 for tag in &game.tags {
@@ -1721,7 +1803,7 @@ impl App {
                 };
                 ui.label(note);
                 ui.weak(
-                    "Esc, Tab, F5, F8 and F11 are the launcher's own keys while a game runs. \
+                    "Esc, Tab, F5, F8, F9 and F11 are the launcher's own keys while a game runs. \
                      The first gamepad plugged in is player 1 and the second player 2; the \
                      left stick works as the d-pad too.",
                 );
@@ -1741,7 +1823,6 @@ impl App {
         self.controls_open = open;
     }
 
-    /// One box of the Controls window: what's bound, and click to change it.
     fn binding_box(&mut self, ui: &mut egui::Ui, which: Capture) {
         let names = self.bindings(which).clone();
         let label = if names.is_empty() {
@@ -1896,6 +1977,11 @@ impl App {
             Button::LeftShoulder => self.move_selection(Move::PageUp),
             Button::RightShoulder => self.move_selection(Move::PageDown),
             Button::A | Button::Start => self.play_selected(),
+            Button::X => {
+                if let Some(key) = self.selected.clone() {
+                    self.toggle_favorite(&key);
+                }
+            }
             Button::Y => {
                 self.config.view = match self.config.view {
                     LibraryView::List => LibraryView::Covers,

@@ -10,7 +10,6 @@ use nes_emulator::joypad::JoypadButton;
 use sdl2::controller::Button;
 use serde::{Deserialize, Serialize};
 
-/// The NES controller's buttons, in the order the settings show them.
 pub const BUTTONS: [(JoypadButton, &str); 8] = [
     (JoypadButton::UP, "Up"),
     (JoypadButton::DOWN, "Down"),
@@ -22,16 +21,12 @@ pub const BUTTONS: [(JoypadButton, &str); 8] = [
     (JoypadButton::SELECT, "Select"),
 ];
 
-/// Keys the launcher keeps for itself while a game runs (menu, fast
-/// forward, save states, fullscreen).
-pub const RESERVED_KEYS: [Key; 5] = [Key::Escape, Key::Tab, Key::F5, Key::F8, Key::F11];
+pub const RESERVED_KEYS: [Key; 6] = [Key::Escape, Key::Tab, Key::F5, Key::F8, Key::F9, Key::F11];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayerControls {
-    /// The keys for each of `BUTTONS`.
     pub keys: [Vec<String>; 8],
-    /// The gamepad buttons for each of `BUTTONS`.
     pub pad: [Vec<String>; 8],
 }
 
@@ -39,7 +34,6 @@ pub struct PlayerControls {
 #[serde(default)]
 pub struct Controls {
     pub players: [PlayerControls; 2],
-    /// The Famicom's microphone, on player 2's controller.
     pub microphone: Vec<String>,
 }
 
@@ -61,7 +55,6 @@ fn default_pad() -> [Vec<String>; 8] {
 }
 
 impl PlayerControls {
-    /// The standalone emulator's keys for player 1 or 2.
     pub fn default_for(player: usize) -> PlayerControls {
         let keys = if player == 0 {
             names([&["Up"], &["Down"], &["Left"], &["Right"], &["A"], &["S"], &["Enter"], &["Space"]])
@@ -91,9 +84,6 @@ impl Default for Controls {
 }
 
 impl Controls {
-    /// The NES buttons the held keys press, for each player, and the
-    /// microphone. `held` has the names of the keys held down, modifiers
-    /// included (see `held_names`).
     pub fn keyboard_state(&self, held: &[String]) -> ([JoypadButton; 2], bool) {
         let is_held = |bound: &Vec<String>| bound.iter().any(|name| held.contains(name));
         let buttons = std::array::from_fn(|player| {
@@ -108,7 +98,6 @@ impl Controls {
         (buttons, is_held(&self.microphone))
     }
 
-    /// Each player's gamepad layout, for the emulator.
     pub fn pad_layouts(&self) -> [PadLayout; 2] {
         std::array::from_fn(|player| {
             let mut layout = PadLayout::new();
@@ -124,7 +113,6 @@ impl Controls {
     }
 }
 
-/// The names of the held keys and modifiers, for `keyboard_state`.
 pub fn held_names(keys: &[Key], modifiers: Modifiers) -> Vec<String> {
     let mut names: Vec<String> = keys.iter().map(|key| key.name().to_string()).collect();
     for (held, name) in [(modifiers.shift, "Shift"), (modifiers.ctrl, "Ctrl"), (modifiers.alt, "Alt")] {
@@ -135,7 +123,6 @@ pub fn held_names(keys: &[Key], modifiers: Modifiers) -> Vec<String> {
     names
 }
 
-/// How a key is shown: its symbol for the arrows, otherwise its name.
 pub fn key_label(name: &str) -> String {
     match Key::from_name(name) {
         Some(key) => key.symbol_or_name().to_string(),
@@ -143,8 +130,6 @@ pub fn key_label(name: &str) -> String {
     }
 }
 
-/// How a gamepad button is shown (named as on an Xbox pad, which is how SDL
-/// names them).
 pub fn pad_label(name: &str) -> String {
     match name {
         "a" => "A",

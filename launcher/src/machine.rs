@@ -43,7 +43,8 @@ enum Command {
     SaveState { slot: usize, path: PathBuf },
     LoadState { slot: usize, path: PathBuf },
     Keyboard([JoypadButton; 2], bool),
-    PadLayouts(Box<[PadLayout; 2]>)
+    PadLayouts(Box<[PadLayout; 2]>),
+    Volume(f32)
 }
 
 pub enum Report {
@@ -155,6 +156,10 @@ impl Machine {
         let _ = self.commands.send(Command::PadLayouts(Box::new(layouts)));
     }
 
+    pub fn set_volume(&self, gain: f32) {
+        let _ = self.commands.send(Command::Volume(gain));
+    }
+
     pub fn poll(&self) -> Option<Report> {
         self.reports.try_recv().ok()
     }
@@ -173,7 +178,8 @@ struct MachineThread {
     input: Rc<RefCell<Input>>,
     events: Rc<RefCell<Option<sdl2::EventPump>>>,
     sdl_error: Option<String>,
-    pad_reporter: Rc<PadReporter>
+    pad_reporter: Rc<PadReporter>,
+    volume: Rc<Cell<f32>>
 }
 
 impl MachineThread {
@@ -206,7 +212,8 @@ impl MachineThread {
             events: Rc::new(RefCell::new(events)),
             sdl,
             sdl_error,
-            pad_reporter
+            pad_reporter,
+            volume: Rc::new(Cell::new(1.0))
         }
     }
 
@@ -225,8 +232,19 @@ impl MachineThread {
         match self.open_audio() {
             Ok(mut output) => {
                 let muted = muted.clone();
+                let volume = self.volume.clone();
+                let mut scaled = Vec::new();
                 nes.set_audio_output(output.sample_rate(), move |samples| {
-                    if muted.get() { 1.0 } else { output.push(samples) }
+                    if muted.get() {
+                        return 1.0;
+                    }
+                    let volume = volume.get();
+                    if volume == 1.0 {
+                        return output.push(samples);
+                    }
+                    scaled.clear();
+                    scaled.extend(samples.iter().map(|sample| sample * volume));
+                    output.push(&scaled)
                 });
             }
             Err(e) => warning = warning.or(Some(format!("No Sound: {e}")))
@@ -291,7 +309,7 @@ impl MachineThread {
                         }
                         let _ = self.reports.send(Report::StateLoaded { slot, result });
                     }
-                    Ok(command @ (Command::Keyboard(..) | Command::PadLayouts(_))) => {
+                    Ok(command @ (Command::Keyboard(..) | Command::PadLayouts(_) | Command::Volume(_))) => {
                         self.settings_command(command)
                     }
                     Ok(Command::Start(_)) => {},
@@ -323,6 +341,7 @@ impl MachineThread {
         match command {
             Command::Keyboard(buttons, microphone) => input.set_keyboard(buttons, microphone),
             Command::PadLayouts(layouts) => input.set_pad_layouts(*layouts),
+            Command::Volume(gain) => self.volume.set(gain),
             _ => {}
         }
     }
