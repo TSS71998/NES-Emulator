@@ -2,7 +2,7 @@
 /mynes.log
 /nestest_no_cycle.log
 /nestest.log
+/web/dist
 *.nes
-!Alter_Ego.nes
-!smb3.nes
+!moonlight.nes
 *.sav

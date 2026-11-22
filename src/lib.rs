@@ -5,11 +5,13 @@
 extern crate bitflags;
 
 pub mod apu;
+#[cfg(feature = "sdl")]
 pub mod audio;
 pub mod bus;
 pub mod cartridge;
 pub mod cpu;
 pub mod frame_limiter;
+#[cfg(feature = "sdl")]
 pub mod input;
 pub mod joypad;
 pub mod mapper;
