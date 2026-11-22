@@ -22,7 +22,7 @@ impl RateControl {
     }
 
     fn adjust(&mut self, fill: f64) -> f64 {
-        self.smoothed_fill += 0.5 * (fill - self.smoothed_fill);
+        self.smoothed_fill += 0.05 * (fill - self.smoothed_fill);
         let error = (self.target - self.smoothed_fill) / self.target;
         self.trim = (self.trim + KI * error).clamp(-MAX_RATE_LATENCY, MAX_RATE_LATENCY);
         1.0 + (self.trim + KP * error).clamp(-MAX_RATE_LATENCY, MAX_RATE_LATENCY)
@@ -148,7 +148,7 @@ pub extern "C" fn set_audio_fill(samples: u32) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fun_frame() {
+pub extern "C" fn run_frame() {
     with_page(|page| {
         let Some(machine) = page.machine.as_mut() else { return };
         let rgb = machine.nes.run_frame();
